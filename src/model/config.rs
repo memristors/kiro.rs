@@ -148,6 +148,23 @@ pub struct Config {
     #[serde(default)]
     pub proxy_password: Option<String>,
 
+    /// 新增凭据时自动分配代理（默认关闭）。开启后，没有自带代理设置的新凭据会按下面的
+    /// 模板得到专属代理；已有凭据不受影响。
+    #[serde(default)]
+    pub auto_proxy_enabled: bool,
+
+    /// 自动分配的代理地址，如 `http://10.3.34.10:8443`
+    #[serde(default)]
+    pub auto_proxy_url: Option<String>,
+
+    /// 自动分配的代理用户名模板，`{id}` 会被替换成新凭据的 ID，如 `kiro-session-k{id}`
+    #[serde(default)]
+    pub auto_proxy_username_template: Option<String>,
+
+    /// 自动分配的代理密码
+    #[serde(default)]
+    pub auto_proxy_password: Option<String>,
+
     /// Admin API 密钥（可选，启用 Admin API 功能）
     #[serde(default)]
     pub admin_api_key: Option<String>,
@@ -552,6 +569,10 @@ impl Default for Config {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            auto_proxy_enabled: false,
+            auto_proxy_url: None,
+            auto_proxy_username_template: None,
+            auto_proxy_password: None,
             admin_api_key: None,
             update_previous_version: None,
             github_token: None,

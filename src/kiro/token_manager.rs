@@ -30,6 +30,7 @@ use crate::kiro::model::token_refresh::{
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::kiro::session_affinity::{RouteDecision, SessionAffinity, StickyOutcome};
+use crate::model::auto_proxy::AutoProxyConfig;
 use crate::model::config::Config;
 
 /// 检查 Token 是否在指定时间内过期
@@ -1210,6 +1211,8 @@ pub struct MultiTokenManager {
     config: Config,
     /// 全局代理（运行时可修改）
     proxy: Mutex<Option<ProxyConfig>>,
+    /// 新增凭据时的自动代理分配规则（运行时可修改）
+    auto_proxy: Mutex<AutoProxyConfig>,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
     /// 当前活动凭据 ID
@@ -1490,9 +1493,11 @@ impl MultiTokenManager {
         let self_heal_min_interval_secs = config.self_heal_min_interval_secs;
         let self_heal_max_consecutive_rounds = config.self_heal_max_consecutive_rounds;
         let quota_reset_recovery_enabled = config.quota_reset_recovery_enabled;
+        let auto_proxy = AutoProxyConfig::from_config(&config);
         let manager = Self {
             config,
             proxy: Mutex::new(proxy),
+            auto_proxy: Mutex::new(auto_proxy),
             entries: Mutex::new(entries),
             current_id: Mutex::new(initial_id),
             next_id: AtomicU64::new(next_id),
@@ -1581,6 +1586,16 @@ impl MultiTokenManager {
     /// 获取全局代理配置的克隆（可安全跨锁使用）
     pub fn proxy(&self) -> Option<ProxyConfig> {
         self.proxy.lock().clone()
+    }
+
+    /// 新增凭据时的自动代理分配规则（克隆）
+    pub fn auto_proxy(&self) -> AutoProxyConfig {
+        self.auto_proxy.lock().clone()
+    }
+
+    /// 更新自动代理分配规则（运行时生效，只影响之后新增的凭据）
+    pub fn set_auto_proxy(&self, auto_proxy: AutoProxyConfig) {
+        *self.auto_proxy.lock() = auto_proxy;
     }
 
     /// 设置全局代理配置（运行时修改，可传 None 清除）
@@ -4037,6 +4052,20 @@ impl MultiTokenManager {
             }
         }
 
+        // 2.5 自动代理：凭据没有自己的代理设置时按模板分配。
+        // 验证用的 token 刷新也要走这个代理，否则新账号第一次出口和之后的出口不一致，
+        // 所以 ID 要在验证之前就确定。验证失败会让这个 ID 作废（跳号，无其它副作用）。
+        let auto_proxy = self.auto_proxy();
+        let mut new_cred = new_cred;
+        let reserved_id = if auto_proxy.applies_to(&new_cred) {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            auto_proxy.assign(&mut new_cred, id);
+            tracing::info!("新凭据 #{} 已按自动代理规则分配代理", id);
+            Some(id)
+        } else {
+            None
+        };
+
         // 3. 验证凭据有效性（API Key 无需网络刷新）
         let mut validated_cred = if new_cred.is_api_key_credential() {
             new_cred.clone()
@@ -4063,7 +4092,7 @@ impl MultiTokenManager {
         // 4. 分配新 ID。必须使用单调计数器，不能按当前 entries 最大值重算；
         // 否则删除最后一个账号后再添加会复用旧 ID，导致 trace/usage/kiro_stats
         // 这类按 credential_id 聚合的历史被新账号继承。
-        let new_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let new_id = reserved_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
 
         // 5. 设置 ID 并保留用户输入的元数据
         validated_cred.id = Some(new_id);
