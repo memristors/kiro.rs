@@ -15,6 +15,7 @@ import {
   ScrollText,
   Boxes,
   Wallet,
+  TrendingUp,
   ChevronRight,
   Activity,
   Key,
@@ -1080,6 +1081,16 @@ function CredentialCardImpl({
           size="icon"
           variant="ghost"
           className={`h-8 w-8 ${dispositionButton ? "hidden" : "hidden sm:inline-flex"}`}
+          onClick={() => setShowBalanceDialog(true)}
+          title="额度趋势与明细"
+          aria-label="额度趋势与明细"
+        >
+          <TrendingUp className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className={`h-8 w-8 ${dispositionButton ? "hidden" : "hidden sm:inline-flex"}`}
           onClick={handleRefreshBalanceClick}
           disabled={loadingBalance || credential.disabled}
           title={credential.disabled ? "已禁用" : "刷新余额"}
@@ -1310,6 +1321,16 @@ function CredentialCardImpl({
                 <div className="flex items-center gap-1.5">
                   {subscriptionBadge}
                   {balance && <OverageStatusPill balance={balance} />}
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-6 w-6 shrink-0"
+                    onClick={() => setShowBalanceDialog(true)}
+                    title="额度趋势与明细"
+                    aria-label="额度趋势与明细"
+                  >
+                    <TrendingUp className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
               </div>
 
