@@ -59,7 +59,7 @@ export function EditCredentialDialog({
   const [activeTab, setActiveTab] = useState<TabKey>('general')
   const [email, setEmail] = useState(credential.email ?? '')
   const [proxyUrl, setProxyUrl] = useState(credential.proxyUrl ?? '')
-  const [proxyUsername, setProxyUsername] = useState('')
+  const [proxyUsername, setProxyUsername] = useState(credential.proxyUsername ?? '')
   const [proxyPassword, setProxyPassword] = useState('')
   const [groups, setGroups] = useState<string[]>(credential.groups ?? [])
   const [sourceChannel, setSourceChannel] = useState(credential.sourceChannel ?? '')
@@ -82,7 +82,7 @@ export function EditCredentialDialog({
       setActiveTab('general')
       setEmail(credential.email ?? '')
       setProxyUrl(credential.proxyUrl ?? '')
-      setProxyUsername('')
+      setProxyUsername(credential.proxyUsername ?? '')
       setProxyPassword('')
       setGroups(credential.groups ?? [])
       setSourceChannel(credential.sourceChannel ?? '')
@@ -105,7 +105,9 @@ export function EditCredentialDialog({
         req: {
           email: email,
           proxyUrl: proxyUrl,
-          proxyUsername: proxyUsername || undefined,
+          // 用户名已回显：没改就不提交；改了（包括清空）才提交，空串表示清除
+          proxyUsername:
+            proxyUsername !== (credential.proxyUsername ?? '') ? proxyUsername : undefined,
           proxyPassword: proxyPassword || undefined,
           groups: groups,
           sourceChannel: sourceChannel,
@@ -273,7 +275,7 @@ export function EditCredentialDialog({
                   <div className="grid grid-cols-2 gap-2">
                     <Input
                       id="proxyUsername"
-                      placeholder="代理用户名（留空不修改）"
+                      placeholder="代理用户名（可留空）"
                       value={proxyUsername}
                       onChange={(e) => setProxyUsername(e.target.value)}
                       disabled={isPending}
@@ -281,14 +283,14 @@ export function EditCredentialDialog({
                     <Input
                       id="proxyPassword"
                       type="password"
-                      placeholder="代理密码（留空不修改）"
+                      placeholder={credential.hasProxyPassword ? '已配置，留空则保留' : '代理密码（可留空）'}
                       value={proxyPassword}
                       onChange={(e) => setProxyPassword(e.target.value)}
                       disabled={isPending}
                     />
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    用户名/密码留空表示不修改；代理 URL 已包含凭据时无需填写
+                    用户名已按当前配置显示，清空后保存即清除；密码不会回显，留空表示保持不变；代理 URL 已包含凭据时无需填写
                   </p>
                 </div>
               </>

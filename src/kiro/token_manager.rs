@@ -1144,6 +1144,11 @@ pub struct CredentialEntrySnapshot {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 代理认证用户名（用户名不是密钥，可直接展示；密码从不返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_username: Option<String>,
+    /// 是否已配置代理密码（只告知有无，不返回内容）
+    pub has_proxy_password: bool,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因
@@ -3317,6 +3322,12 @@ impl MultiTokenManager {
                     last_used_at: e.last_used_at.clone(),
                     has_proxy: e.credentials.proxy_url.is_some(),
                     proxy_url: e.credentials.proxy_url.clone(),
+                    proxy_username: e.credentials.proxy_username.clone(),
+                    has_proxy_password: e
+                        .credentials
+                        .proxy_password
+                        .as_deref()
+                        .is_some_and(|p| !p.is_empty()),
                     refresh_failure_count: e.refresh_failure_count,
                     disabled_reason: e.disabled_reason.map(|reason| reason.as_str().to_string()),
                     throttled_remaining_secs: e
