@@ -30,6 +30,7 @@ use crate::kiro::model::token_refresh::{
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::kiro::session_affinity::{RouteDecision, SessionAffinity, StickyOutcome};
+use crate::kiro::queue::{self, Candidate, DecideInput, Decision, DispatchGate, FlightGuard};
 use crate::model::auto_proxy::AutoProxyConfig;
 use crate::model::config::Config;
 
@@ -981,6 +982,10 @@ struct CredentialEntry {
     /// 队列长度达到 `account_rpm_limit` 时该凭据本窗口内被排除出候选。
     /// 不持久化，进程重启后清空；限流关闭时始终为空。
     rpm_window: VecDeque<Instant>,
+    /// 连续被账号级限流的次数（用于渐进冷却）。成功一次清零，距上次限流太久也清零。
+    throttle_streak: u32,
+    /// 最近一次被账号级限流的时间
+    last_throttled_at: Option<Instant>,
     /// 当前凭据连续执行自愈的轮数。同一凭据成功后清零。
     self_heal_consecutive_rounds: u32,
     /// 当前凭据累计被自愈恢复的次数。
@@ -1000,6 +1005,8 @@ impl CredentialEntry {
         self.disabled = false;
         self.disabled_reason = None;
         self.throttled_until = None;
+        self.throttle_streak = 0;
+        self.last_throttled_at = None;
         self.rpm_window.clear();
         self.clear_self_heal_streak();
     }
@@ -1252,6 +1259,8 @@ pub struct MultiTokenManager {
     account_rpm_limit_enabled: AtomicBool,
     /// 单账号每分钟请求次数上限（运行时可修改）
     account_rpm_limit: AtomicU32,
+    /// 调度闸门：每账号并发计数、等待队列及其运行时参数
+    gate: Arc<DispatchGate>,
     /// 是否识别 403 封禁文案并立即禁用（运行时可修改）
     suspended_detection_enabled: AtomicBool,
     /// 全账号自愈总开关（运行时可修改）
@@ -1308,6 +1317,9 @@ pub struct CallContext {
     pub credentials: KiroCredentials,
     /// 访问 Token
     pub token: String,
+    /// 并发名额：随请求（含流式响应体）存活，释放时归还给调度闸门。
+    /// 只有真实业务请求才占名额；Admin 只读查询为 None。
+    pub slot: Option<Arc<FlightGuard>>,
 }
 
 pub struct IdcReloginCredentials {
@@ -1435,6 +1447,8 @@ impl MultiTokenManager {
                     last_used_at: None,
                     throttled_until: None,
                     rpm_window: VecDeque::new(),
+                    throttle_streak: 0,
+                    last_throttled_at: None,
                     self_heal_consecutive_rounds: cred.self_heal_consecutive_rounds,
                     self_heal_total_count: cred.self_heal_total_count,
                     last_self_heal_at,
@@ -1499,6 +1513,13 @@ impl MultiTokenManager {
         let self_heal_max_consecutive_rounds = config.self_heal_max_consecutive_rounds;
         let quota_reset_recovery_enabled = config.quota_reset_recovery_enabled;
         let auto_proxy = AutoProxyConfig::from_config(&config);
+        let gate = DispatchGate::new(
+            config.queue_enabled,
+            config.queue_max_wait_secs,
+            config.queue_max_waiters,
+            config.account_max_concurrency,
+            config.account_throttle_cooldown_base_secs,
+        );
         let manager = Self {
             config,
             proxy: Mutex::new(proxy),
@@ -1519,6 +1540,7 @@ impl MultiTokenManager {
             model_api_429_retry_enabled: AtomicBool::new(model_api_429_retry_enabled),
             account_rpm_limit_enabled: AtomicBool::new(rpm_limit_enabled),
             account_rpm_limit: AtomicU32::new(rpm_limit),
+            gate,
             suspended_detection_enabled: AtomicBool::new(suspended_detection_enabled),
             self_heal_enabled: AtomicBool::new(self_heal_enabled),
             self_heal_min_interval_secs: AtomicU64::new(self_heal_min_interval_secs),
@@ -1918,6 +1940,7 @@ impl MultiTokenManager {
                 .map(|until| until > now)
                 .unwrap_or(false)
             && !self.rpm_exceeded(entry, now)
+            && !self.gate.at_cap(entry.id)
             && credential_matches_request(&entry.credentials, model, group)
             && self.cached_model_support(entry.id, model) != CachedModelSupport::Unsupported
     }
@@ -2216,6 +2239,10 @@ impl MultiTokenManager {
         let total = self.total_count_in_group(group);
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
         let mut attempt_count = 0;
+        // 排队等待状态：只有真实业务请求（update_current）才会排队；守卫在函数返回、
+        // 或客户端断开导致 future 被丢弃时自动退出队列。
+        let wait_started = Instant::now();
+        let mut waiter: Option<queue::WaiterGuard> = None;
 
         loop {
             if attempt_count >= max_attempts {
@@ -2248,6 +2275,50 @@ impl MultiTokenManager {
                     }
                     (new_id, new_creds)
                 } else {
+                    // 暂时没有可用账号（冷却中 / RPM 用尽 / 并发已满）：先看能不能排队等待，
+                    // 等不到再回 429 + Retry-After，而不是立刻失败让客户端狂重试。
+                    if update_current {
+                        match self.queue_decision(
+                            model,
+                            group,
+                            wait_started.elapsed(),
+                            waiter.is_some(),
+                        ) {
+                            Decision::Wait(sleep_for) => {
+                                if waiter.is_none() {
+                                    match self.gate.enter_queue() {
+                                        Some(guard) => {
+                                            tracing::info!(
+                                                "没有立即可用的账号，请求进入排队等待（当前排队 {}）",
+                                                self.gate.waiting()
+                                            );
+                                            waiter = Some(guard);
+                                        }
+                                        None => {
+                                            return Err(UpstreamRateLimitError::new(Some(
+                                                "2".to_string(),
+                                            ))
+                                            .into());
+                                        }
+                                    }
+                                }
+                                self.gate.sleep_or_wake(sleep_for).await;
+                                continue;
+                            }
+                            Decision::Reject { retry_after_secs } => {
+                                tracing::warn!(
+                                    "没有可用账号且不再等待（已等 {:.1}s），返回 429，Retry-After={}s",
+                                    wait_started.elapsed().as_secs_f32(),
+                                    retry_after_secs
+                                );
+                                return Err(UpstreamRateLimitError::new(Some(
+                                    retry_after_secs.to_string(),
+                                ))
+                                .into());
+                            }
+                            Decision::NoCandidate => {}
+                        }
+                    }
                     let entries = self.entries.lock();
                     // RPM 打满（而非全部禁用）时回 429 并带 Retry-After，
                     // 让调用方知道这是限流而不是凭据耗尽。
@@ -2270,11 +2341,18 @@ impl MultiTokenManager {
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
-                Ok(ctx) => {
-                    // 仅真实业务请求计入 RPM 窗口；Admin 只读模型发现不消耗额度。
-                    if update_current && !self.record_request(id) {
-                        // Token 获取期间额度可能被其它并发请求抢先占用；重新选号。
-                        continue;
+                Ok(mut ctx) => {
+                    if update_current {
+                        // 先占并发名额：Token 获取期间名额可能被其它并发请求抢先占满；重新选号。
+                        let Some(slot) = self.gate.try_acquire(id) else {
+                            continue;
+                        };
+                        // 仅真实业务请求计入 RPM 窗口；Admin 只读模型发现不消耗额度。
+                        if !self.record_request(id) {
+                            // 额度被抢占：slot 在这里随 continue 一起释放。
+                            continue;
+                        }
+                        ctx.slot = Some(Arc::new(slot));
                     }
                     return Ok((ctx, is_balanced, route));
                 }
@@ -2367,6 +2445,7 @@ impl MultiTokenManager {
                 id,
                 credentials: credentials.clone(),
                 token,
+                slot: None,
             });
         }
 
@@ -2437,6 +2516,7 @@ impl MultiTokenManager {
             id,
             credentials: creds,
             token,
+            slot: None,
         })
     }
 
@@ -2737,7 +2817,15 @@ impl MultiTokenManager {
                 entry.refresh_failure_count = 0;
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
-                // 成功 = 风控已解除，提前结束冷却
+                // 成功 = 风控已解除，提前结束冷却。冷却期内到达的成功来自限流之前就已发出的请求
+                // （在途请求），不能证明限流已经解除，所以不清零连续限流计数。
+                if !entry
+                    .throttled_until
+                    .map(|until| until > Instant::now())
+                    .unwrap_or(false)
+                {
+                    entry.throttle_streak = 0;
+                }
                 entry.throttled_until = None;
                 tracing::debug!(
                     "凭据 #{} API 调用成功（累计 {} 次）",
@@ -3421,17 +3509,190 @@ impl MultiTokenManager {
         }
     }
 
+    /// 账号级限流的**渐进冷却**：首次只冷却很短，连续被限流才翻倍加长，上限为配置的冷却上限；
+    /// 上游给了 Retry-After 时以它为准。一次成功请求会清零连续次数。
+    ///
+    /// 已经在冷却中的凭据（同一时刻多个在途请求一起收到 429）只记一次，不重复加码也不延长。
+    /// 返回（当前请求范围内剩余可用凭据数，本次实际冷却秒数）。
+    pub fn report_account_throttled_adaptive(
+        &self,
+        id: u64,
+        retry_after_secs: Option<u64>,
+        model: Option<&str>,
+        group: Option<&str>,
+    ) -> (usize, u64) {
+        let now = Instant::now();
+        let base = self.gate.cooldown_base_secs.load(Ordering::Relaxed);
+        let max = self.get_account_throttle_cooldown_secs();
+        let mut applied_secs = 0;
+        let remaining = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                let cooling_until = entry.throttled_until.filter(|until| *until > now);
+                if let Some(until) = cooling_until {
+                    applied_secs = until.saturating_duration_since(now).as_secs().max(1);
+                } else {
+                    let streak = match entry.last_throttled_at {
+                        Some(at)
+                            if now.duration_since(at)
+                                < StdDuration::from_secs(queue::STREAK_FORGET_SECS) =>
+                        {
+                            entry.throttle_streak.saturating_add(1)
+                        }
+                        _ => 1,
+                    };
+                    entry.throttle_streak = streak;
+                    entry.last_throttled_at = Some(now);
+                    applied_secs = queue::next_cooldown_secs(base, max, streak, retry_after_secs);
+                    entry.throttled_until = Some(now + StdDuration::from_secs(applied_secs));
+                }
+                // 计入累计失败（账号限流不动连续 failure_count，避免冷却结束后误禁用）
+                entry.total_failure_count += 1;
+                tracing::warn!(
+                    "凭据 #{} 触发账号级限流（连续第 {} 次），冷却 {} 秒",
+                    id,
+                    entry.throttle_streak,
+                    applied_secs
+                );
+            }
+
+            let throttled_now = Instant::now();
+            entries
+                .iter()
+                .filter(|e| {
+                    !e.disabled
+                        && !e
+                            .throttled_until
+                            .map(|t| t > throttled_now)
+                            .unwrap_or(false)
+                        && credential_matches_request(&e.credentials, model, group)
+                })
+                .count()
+        };
+        (remaining, applied_secs)
+    }
+
+    /// 某个"只是暂时不可用"的候选账号还要多久可用；`None` 表示要等在途请求结束（并发已满）
+    fn queue_candidate(&self, entry: &CredentialEntry, now: Instant) -> Candidate {
+        if self.gate.at_cap(entry.id) {
+            return Candidate { ready_in: None };
+        }
+        let mut ready = StdDuration::ZERO;
+        if let Some(until) = entry.throttled_until {
+            ready = ready.max(until.saturating_duration_since(now));
+        }
+        if let Some(rpm_wait) = self.rpm_release_in(entry, now) {
+            ready = ready.max(rpm_wait);
+        }
+        Candidate {
+            ready_in: Some(ready),
+        }
+    }
+
+    /// RPM 窗口还要多久才有额度；没用尽（或未开启限流）返回 `None`
+    fn rpm_release_in(&self, entry: &CredentialEntry, now: Instant) -> Option<StdDuration> {
+        if !self.account_rpm_limit_enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let limit = self.account_rpm_limit.load(Ordering::Relaxed) as usize;
+        if limit == 0 {
+            return None;
+        }
+        let window = StdDuration::from_secs(RPM_WINDOW_SECS);
+        let fresh: Vec<Instant> = entry
+            .rpm_window
+            .iter()
+            .copied()
+            .filter(|ts| now.duration_since(*ts) < window)
+            .collect();
+        if fresh.len() < limit {
+            return None;
+        }
+        let release_at = fresh[fresh.len() - limit] + window;
+        Some(release_at.saturating_duration_since(now))
+    }
+
+    /// 没有立即可用的账号时，决定排队等待、直接 429 还是走原来的错误路径
+    fn queue_decision(
+        &self,
+        model: Option<&str>,
+        group: Option<&str>,
+        waited: StdDuration,
+        already_waiting: bool,
+    ) -> Decision {
+        let now = Instant::now();
+        let candidates: Vec<Candidate> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|e| {
+                    !e.disabled
+                        && credential_matches_request(&e.credentials, model, group)
+                        && self.cached_model_support(e.id, model)
+                            != CachedModelSupport::Unsupported
+                })
+                .map(|e| self.queue_candidate(e, now))
+                .collect()
+        };
+        let settings = self.gate.settings();
+        queue::decide(&DecideInput {
+            queue_enabled: settings.queue_enabled,
+            waited,
+            max_wait: StdDuration::from_secs(settings.queue_max_wait_secs),
+            queue_full: self.gate.queue_full(),
+            already_waiting,
+            candidates: &candidates,
+        })
+    }
+
+    /// 调度闸门（并发计数、等待队列）
+    pub fn gate(&self) -> &Arc<DispatchGate> {
+        &self.gate
+    }
+
+    /// 读取排队 / 并发 / 渐进冷却参数
+    pub fn queue_settings(&self) -> queue::QueueSettings {
+        self.gate.settings()
+    }
+
+    /// 更新排队 / 并发 / 渐进冷却参数：运行时立即生效并写入 config.json；持久化失败回滚。
+    pub fn set_queue_settings(&self, new: queue::QueueSettings) -> anyhow::Result<()> {
+        new.validate(self.get_account_throttle_cooldown_secs())?;
+        let _update_guard = self.runtime_config_update_lock.lock();
+        let prev = self.gate.settings();
+        if prev == new {
+            return Ok(());
+        }
+        self.gate.apply(new);
+        if let Err(err) = self.update_config_file(move |config| {
+            config.account_throttle_cooldown_base_secs = new.cooldown_base_secs;
+            config.queue_enabled = new.queue_enabled;
+            config.queue_max_wait_secs = new.queue_max_wait_secs;
+            config.queue_max_waiters = new.queue_max_waiters;
+            config.account_max_concurrency = new.account_max_concurrency;
+        }) {
+            self.gate.apply(prev);
+            return Err(err);
+        }
+        tracing::info!("排队与并发配置已更新: {:?}", new);
+        Ok(())
+    }
+
     /// 手动解除指定凭据的临时冷却（Admin API）
     ///
     /// 即使冷却尚未到期也立即清除，让该凭据重新参与调度。
     pub fn clear_throttle(&self, id: u64) -> anyhow::Result<()> {
-        let mut entries = self.entries.lock();
-        let entry = entries
-            .iter_mut()
-            .find(|e| e.id == id)
-            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-        entry.throttled_until = None;
-        tracing::info!("凭据 #{} 限流冷却已被手动解除", id);
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.throttled_until = None;
+            entry.throttle_streak = 0;
+            tracing::info!("凭据 #{} 限流冷却已被手动解除", id);
+        }
+        self.gate.wake();
         Ok(())
     }
 
@@ -4175,6 +4436,8 @@ impl MultiTokenManager {
                 last_used_at: None,
                 throttled_until: None,
                 rpm_window: VecDeque::new(),
+                throttle_streak: 0,
+                last_throttled_at: None,
                 self_heal_consecutive_rounds: 0,
                 self_heal_total_count: 0,
                 last_self_heal_at: None,

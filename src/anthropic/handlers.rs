@@ -147,6 +147,8 @@ pub(crate) struct RequestTracer {
     /// provider 成功返回 `reqwest::Response`，即已收到上游 HTTP 响应头。
     /// 不能用「尚未 finalize」代替这个状态：下游可能在读取 body 前取消。
     upstream_headers_received: std::sync::atomic::AtomicBool,
+    /// 实时请求登记项：阶段（排队 / 连接中 / 等首字 / 输出中）随请求推进，结束时移除。
+    live: std::sync::Arc<crate::admin::live::LiveEntry>,
 }
 
 /// usage 三项的来源，落到 trace 行便于区分「上游真值」与「本地估算」。
@@ -211,10 +213,20 @@ struct RequestTraceOptions {
 
 impl RequestTracer {
     fn new(state: &AppState, options: RequestTraceOptions) -> Self {
+        let trace_id = Uuid::new_v4().to_string();
+        let ts = Utc::now().to_rfc3339();
+        let live = crate::admin::live::LiveEntry::register(
+            trace_id.clone(),
+            ts.clone(),
+            options.model.clone(),
+            options.key_ctx.key_id,
+            options.is_stream,
+            options.key_ctx.client_ip.clone(),
+        );
         Self {
             store: state.trace_store.clone(),
-            trace_id: Uuid::new_v4().to_string(),
-            ts: Utc::now().to_rfc3339(),
+            trace_id,
+            ts,
             key_id: options.key_ctx.key_id,
             key_source: options.key_ctx.key_source,
             client_ip: options.key_ctx.client_ip,
@@ -226,6 +238,7 @@ impl RequestTracer {
             route: parking_lot::Mutex::new(None),
             finalized: std::sync::atomic::AtomicBool::new(false),
             upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+            live,
         }
     }
 
@@ -234,6 +247,7 @@ impl RequestTracer {
     pub(super) fn mark_upstream_headers_received(&self) {
         self.upstream_headers_received
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.live.set_headers_received();
     }
 
     /// 标记首个可发送的内容到达（幂等，仅记录第一次）。
@@ -245,6 +259,8 @@ impl RequestTracer {
         if slot.is_none() {
             *slot = Some(Instant::now());
         }
+        drop(slot);
+        self.live.set_first_token();
     }
 
     fn mark_first_content(&self, events: &[SseEvent]) {
@@ -281,6 +297,8 @@ impl RequestTracer {
         {
             return;
         }
+        // 请求到此结束：从进行中登记移除，并取得累计排队时间写进记录
+        let queue_ms = self.live.finish();
         let Some(store) = &self.store else { return };
         let attempts = std::mem::take(&mut *self.attempts.lock());
         // 最终凭据：最后一跳的命中凭据（成功跳即命中凭据，失败跳即最后尝试的凭据）
@@ -315,6 +333,7 @@ impl RequestTracer {
             previous_credential_id: route.as_ref().and_then(|r| r.previous_credential_id),
             usage_source: usage.source.as_db().map(|s| s.to_string()),
             client_ip: self.client_ip.clone(),
+            queue_ms,
             attempts,
         };
         store.insert(&rec);
@@ -373,6 +392,14 @@ impl TraceSink for RequestTracer {
         if slot.is_none() {
             *slot = Some(route);
         }
+    }
+
+    fn on_selected(&self, credential_id: u64) {
+        self.live.set_selected(credential_id);
+    }
+
+    fn queue_hook(&self) -> Option<std::sync::Arc<dyn crate::kiro::queue::QueueHook>> {
+        Some(self.live.clone())
     }
 }
 
@@ -1083,6 +1110,8 @@ async fn handle_stream_request(
     tracer.mark_upstream_headers_received();
     let response = call_result.response;
     let credential_id = call_result.credential_id;
+    // 并发名额要持有到流结束：放进流的状态里，流被丢弃（含客户端断开）时自动归还
+    let slot = call_result.slot;
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(
@@ -1098,7 +1127,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events, hook, credential_id, tracer);
+    let stream = create_sse_stream(response, ctx, initial_events, hook, credential_id, tracer, slot);
 
     // 返回 SSE 响应
     // `x-accel-buffering: no` 让前置 nginx 对本次响应关闭 proxy_buffering。
@@ -1130,6 +1159,7 @@ fn create_sse_stream(
     hook: UsageRecordHook,
     credential_id: u64,
     tracer: std::sync::Arc<RequestTracer>,
+    slot: Option<std::sync::Arc<crate::kiro::queue::FlightGuard>>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -1140,7 +1170,7 @@ fn create_sse_stream(
 
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
-    let settlement = StreamSettlement::new(hook, credential_id, tracer, &ctx);
+    let settlement = StreamSettlement::new(hook, credential_id, tracer, &ctx).with_slot(slot);
 
     let processing_stream = stream::unfold(
         (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), settlement, 0u64),
@@ -1264,9 +1294,16 @@ struct StreamSettlement {
     usage: TraceUsage,
     sent_bytes: u64,
     settled: bool,
+    /// 并发名额，随流存活；流结束或被丢弃时释放
+    _slot: Option<std::sync::Arc<crate::kiro::queue::FlightGuard>>,
 }
 
 impl StreamSettlement {
+    fn with_slot(mut self, slot: Option<std::sync::Arc<crate::kiro::queue::FlightGuard>>) -> Self {
+        self._slot = slot;
+        self
+    }
+
     fn interrupt(
         &mut self,
         ctx: &mut StreamContext,
@@ -1305,6 +1342,7 @@ impl StreamSettlement {
             usage: stream_trace_usage(ctx),
             sent_bytes: 0,
             settled: false,
+            _slot: None,
         }
     }
 

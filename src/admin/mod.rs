@@ -17,6 +17,7 @@
 //! ```
 
 pub mod backup;
+pub mod live;
 mod error;
 mod handlers;
 mod middleware;

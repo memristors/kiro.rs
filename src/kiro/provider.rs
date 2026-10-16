@@ -97,6 +97,9 @@ impl ClientCache {
 pub struct KiroCallResult {
     pub response: reqwest::Response,
     pub credential_id: u64,
+    /// 该账号的并发名额。调用方要把它持有到响应体读完（流式场景放进流的状态里），
+    /// 释放后名额才会归还给调度闸门。
+    pub slot: Option<std::sync::Arc<crate::kiro::queue::FlightGuard>>,
 }
 
 /// A successful MCP HTTP response whose trace attempt is finalized after body validation.
@@ -770,12 +773,21 @@ impl KiroProvider {
         for attempt in 0..max_retries {
             let attempt_start = Instant::now();
             // 获取调用上下文（绑定 index、credentials、token）；同一会话优先沿用上一轮凭据
-            let mut ctx = match self
-                .token_manager
-                .acquire_context_routed(model.as_deref(), group, session_id.as_deref())
-                .await
-            {
+            let acquire = self.token_manager.acquire_context_routed(
+                model.as_deref(),
+                group,
+                session_id.as_deref(),
+            );
+            // 排队等待时让实时请求日志显示「排队」；没有观察者时直接 await
+            let acquired = match sink.and_then(|s| s.queue_hook()) {
+                Some(hook) => crate::kiro::queue::QUEUE_HOOK.scope(hook, acquire).await,
+                None => acquire.await,
+            };
+            let mut ctx = match acquired {
                 Ok((c, route)) => {
+                    if let Some(sink) = sink {
+                        sink.on_selected(c.id);
+                    }
                     // 只在首次选号时计入命中率并上报 trace；重试轮次的判定受本请求内
                     // 刚发生的失败影响，不代表会话层面的粘性效果。
                     if attempt == 0 {
@@ -926,6 +938,7 @@ impl KiroProvider {
                 return Ok(KiroCallResult {
                     response,
                     credential_id: ctx.id,
+                    slot: ctx.slot.clone(),
                 });
             }
 
@@ -1137,11 +1150,19 @@ impl KiroProvider {
                     self.token_manager.get_model_api_429_retry_enabled(),
                 ) {
                     ModelApi429Action::Failover => {
-                        let cooldown_secs = self
+                        // 渐进冷却：首次很短，连续限流才加长；上游给了 Retry-After 时以它为准
+                        let explicit_retry_after = rate_limit_error
+                            .as_ref()
+                            .and_then(|error| error.retry_after())
+                            .and_then(|value| value.trim().parse::<u64>().ok());
+                        let (remaining, cooldown_secs) = self
                             .token_manager
-                            .get_account_throttle_cooldown_secs()
-                            .max(1);
-                        let cooldown = std::time::Duration::from_secs(cooldown_secs);
+                            .report_account_throttled_adaptive(
+                                ctx.id,
+                                explicit_retry_after,
+                                model.as_deref(),
+                                group,
+                            );
                         tracing::warn!(
                             "API 请求失败（账号级限流，凭据 #{} 冷却 {}s 并切换，尝试 {}/{}）: {}",
                             ctx.id,
@@ -1150,15 +1171,6 @@ impl KiroProvider {
                             max_retries,
                             body
                         );
-
-                        let remaining = self
-                            .token_manager
-                            .report_account_throttled_for_request(
-                                ctx.id,
-                                cooldown,
-                                model.as_deref(),
-                                group,
-                            );
                         Self::emit_attempt(
                             sink, attempt, ctx.id, endpoint_name, Some(429),
                             outcome::ACCOUNT_THROTTLED, Some(&body), attempt_start,
@@ -1168,7 +1180,9 @@ impl KiroProvider {
                         // 返回客户端。
                         let rate_limit_error =
                             account_rate_limit_with_fallback(rate_limit_error, cooldown_secs);
-                        if remaining == 0 {
+                        // 没有其它可用账号：排队开启时不直接失败，下一轮选号会排队等最近一个账号恢复
+                        // （最长 queue_max_wait_secs），等不到才返回 429 + Retry-After。
+                        if remaining == 0 && !self.token_manager.queue_settings().queue_enabled {
                             return Err(rate_limit_error.into());
                         }
                         last_error = Some(rate_limit_error.into());

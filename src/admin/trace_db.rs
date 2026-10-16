@@ -142,6 +142,9 @@ pub struct TraceRecord {
     /// 客户端 IP（转发头优先，回落到 TCP 对端）。None = 老记录 / 无法确定。
     #[serde(default)]
     pub client_ip: Option<String>,
+    /// 累计排队等待毫秒数（没有账号立即可用时在队列里等的时间）。0 = 没排队 / 老记录。
+    #[serde(default)]
+    pub queue_ms: u64,
     /// 每跳明细
     pub attempts: Vec<TraceAttempt>,
 }
@@ -221,6 +224,12 @@ pub trait TraceSink: Send + Sync {
     fn on_attempt(&self, attempt: TraceAttempt);
     /// 凭据选择结果（粘性命中 / 换号）。默认空实现，非 trace 场景零开销。
     fn on_route(&self, _route: TraceRoute) {}
+    /// 本次请求选中了某个凭据（每次尝试一次）。默认空实现。
+    fn on_selected(&self, _credential_id: u64) {}
+    /// 选号排队的观察者，供实时请求日志显示「排队」。默认没有。
+    fn queue_hook(&self) -> Option<std::sync::Arc<dyn crate::kiro::queue::QueueHook>> {
+        None
+    }
 }
 
 /// 查询过滤条件
@@ -355,7 +364,7 @@ impl TraceStore {
         // (列名, 定义) —— 与 SCHEMA 中新增列保持一致
         // 注意 key_source 不带 NOT NULL：老库已有行需先以 NULL 添加再回填（SQLite ALTER ADD COLUMN
         // NOT NULL 不带常量 DEFAULT 时无法对已有行赋值）。新插入永远写入合法值。
-        let columns: [(&str, &str); 12] = [
+        let columns: [(&str, &str); 13] = [
             ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0"),
@@ -368,6 +377,7 @@ impl TraceStore {
             ("previous_credential_id", "INTEGER"),
             ("usage_source", "TEXT"),
             ("client_ip", "TEXT"),
+            ("queue_ms", "INTEGER NOT NULL DEFAULT 0"),
         ];
         let key_source_added = !existing.contains("key_source");
         for (name, def) in columns {
@@ -438,9 +448,9 @@ impl TraceStore {
                  total_attempts, duration_ms, interrupted_after_bytes, \
                  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
                  credits, first_token_ms, session_id, sticky_outcome, previous_credential_id, \
-                 usage_source, client_ip) \
+                 usage_source, client_ip, queue_ms) \
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,\
-                 ?21,?22,?23,?24,?25)",
+                 ?21,?22,?23,?24,?25,?26)",
                 rusqlite::params![
                     rec.trace_id,
                     rec.ts,
@@ -467,6 +477,7 @@ impl TraceStore {
                     rec.previous_credential_id.map(|v| v as i64),
                     rec.usage_source,
                     rec.client_ip,
+                    rec.queue_ms as i64,
                 ],
             )?;
             for a in &rec.attempts {
@@ -637,7 +648,7 @@ impl TraceStore {
             "SELECT trace_id, ts, key_id, key_source, model, is_stream, final_status, final_credential_id, \
              error_type, error_message, total_attempts, duration_ms, interrupted_after_bytes, \
              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, credits, first_token_ms, \
-             session_id, sticky_outcome, previous_credential_id, usage_source, client_ip \
+             session_id, sticky_outcome, previous_credential_id, usage_source, client_ip, queue_ms \
              FROM traces {} ORDER BY ts_epoch DESC LIMIT {} OFFSET {}",
             where_sql, limit, q.offset
         );
@@ -669,6 +680,7 @@ impl TraceStore {
                 previous_credential_id: row.get::<_, Option<i64>>(21)?.map(|v| v as u64),
                 usage_source: row.get(22)?,
                 client_ip: row.get(23)?,
+                queue_ms: row.get::<_, i64>(24)?.max(0) as u64,
                 attempts: Vec::new(),
             })
         })?;
@@ -965,7 +977,8 @@ CREATE TABLE IF NOT EXISTS traces (
     sticky_outcome    TEXT,
     previous_credential_id INTEGER,
     usage_source      TEXT,
-    client_ip         TEXT
+    client_ip         TEXT,
+    queue_ms          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(ts_epoch DESC);
 CREATE INDEX IF NOT EXISTS idx_traces_status ON traces(final_status);
@@ -1041,6 +1054,7 @@ mod tests {
             previous_credential_id: Some(input.credential_id),
             usage_source: Some(usage_source::SIMULATED.to_string()),
             client_ip: Some("203.0.113.9".to_string()),
+            queue_ms: 0,
             attempts: vec![
                 TraceAttempt {
                     attempt: 0,
@@ -1643,5 +1657,22 @@ mod tests {
         store.record_credit_point_at(1, 2.0, 10.0, now - 86400);
         store.cleanup();
         assert_eq!(store.credit_history(None, 0, 10).len(), 1);
+    }
+
+    #[test]
+    fn queue_ms_roundtrips_and_old_rows_default_to_zero() {
+        let store = TraceStore::open_in_memory().unwrap();
+        let mut waited = sample_at("q1", "m", 5);
+        waited.queue_ms = 18_250;
+        store.insert(&waited);
+        store.insert(&sample_at("q2", "m", 6));
+
+        let (records, _) = store.query_paged(&TraceQuery {
+            limit: 10,
+            ..Default::default()
+        });
+        let by_id = |id: &str| records.iter().find(|r| r.trace_id == id).unwrap();
+        assert_eq!(by_id("q1").queue_ms, 18_250);
+        assert_eq!(by_id("q2").queue_ms, 0);
     }
 }
