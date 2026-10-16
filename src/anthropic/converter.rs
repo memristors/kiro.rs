@@ -651,6 +651,71 @@ fn extract_session_id(user_id: &str) -> Option<String> {
     None
 }
 
+/// 请求里是否已带有可用的会话 id（`metadata.user_id` 里的 session UUID）
+pub(crate) fn has_session_id(req: &MessagesRequest) -> bool {
+    req.metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_deref())
+        .and_then(extract_session_id)
+        .is_some()
+}
+
+/// 指纹里取 system 的前多少个字符：够区分不同应用，又不会被末尾的动态内容（时间、目录）带偏
+const FINGERPRINT_SYSTEM_CHARS: usize = 256;
+/// 指纹里取首条消息的前多少个字符
+const FINGERPRINT_FIRST_MESSAGE_CHARS: usize = 8192;
+
+/// 只取消息里的文本（忽略 cache_control、图片、工具块）：这些会随轮次移动或变化，
+/// 把它们算进指纹会让同一段对话每一轮得到不同的 id。
+fn fingerprint_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// 客户端没带会话 id（比如经 new-api 之类的中转，metadata 被丢掉）时，由请求内容派生一个稳定的会话 id：
+/// 同一段对话每一轮的 system 开头和第一条消息都不变，所以每一轮都得到同一个 id，
+/// 粘性路由（以及本地缓存计量的会话隔离）就能照常工作，不需要客户端配合。
+///
+/// 指纹 = 入口 Key + system 前 256 字符 + 首条消息的文本。
+/// 取不到首条消息文本（纯图片等）时返回 None，宁可不粘也不把不相干的请求粘到一起。
+/// 已知局限：客户端从头部截断历史（滑动窗口）后首条消息变了，会得到新 id，当作新会话。
+pub(crate) fn content_session_id(req: &MessagesRequest, key_id: u64) -> Option<String> {
+    let first = req.messages.first()?;
+    let first_text = fingerprint_text(&first.content);
+    if first_text.trim().is_empty() {
+        return None;
+    }
+    let system: String = req
+        .system
+        .as_ref()
+        .map(|parts| {
+            parts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(FINGERPRINT_SYSTEM_CHARS)
+        .collect();
+    let first_text: String = first_text.chars().take(FINGERPRINT_FIRST_MESSAGE_CHARS).collect();
+    let name = format!(
+        "content-session:{key_id}\u{1f}{system}\u{1f}{}\u{1f}{first_text}",
+        first.role
+    );
+    let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes());
+    Some(format!("session_{uuid}"))
+}
+
 /// 简单验证 UUID 格式（36 字符，包含 4 个连字符）
 fn is_valid_uuid(s: &str) -> bool {
     s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
@@ -3281,6 +3346,98 @@ mod tests {
         let user_id = "user_xxx_session_invalid-uuid";
         let session_id = extract_session_id(user_id);
         assert_eq!(session_id, None);
+    }
+
+    fn fallback_req(system: Option<&str>, first: serde_json::Value, extra_turns: usize) -> MessagesRequest {
+        use super::super::types::{Message as AnthropicMessage, SystemMessage};
+        let mut messages = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: first,
+        }];
+        for i in 0..extra_turns {
+            messages.push(AnthropicMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!(format!("answer {i}")),
+            });
+            messages.push(AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(format!("follow-up {i}")),
+            });
+        }
+        MessagesRequest {
+            model: "claude-sonnet-4.5".to_string(),
+            max_tokens: 1024,
+            messages,
+            stream: false,
+            system: system.map(|t| {
+                vec![SystemMessage {
+                    text: t.to_string(),
+                    cache_control: None,
+                }]
+            }),
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn content_session_id_is_stable_across_turns_and_cache_control_moves() {
+        let turn1 = fallback_req(Some("You are a helpful assistant."), serde_json::json!("Hello there"), 0);
+        // 第 3 轮：历史变长，且客户端把 cache_control 挪到了首条消息的 block 上
+        let turn3 = fallback_req(
+            Some("You are a helpful assistant."),
+            serde_json::json!([{"type": "text", "text": "Hello there", "cache_control": {"type": "ephemeral"}}]),
+            2,
+        );
+        let a = content_session_id(&turn1, 7).expect("应能派生");
+        let b = content_session_id(&turn3, 7).expect("应能派生");
+        assert_eq!(a, b, "同一段对话的不同轮次必须得到同一个会话 id");
+        assert!(a.starts_with("session_"));
+        // 派生值能被正常的会话 id 解析逻辑识别
+        assert!(extract_session_id(&a).is_some());
+    }
+
+    #[test]
+    fn content_session_id_separates_conversations_keys_and_apps() {
+        let base = fallback_req(Some("sys"), serde_json::json!("question one"), 0);
+        let other_message = fallback_req(Some("sys"), serde_json::json!("question two"), 0);
+        let other_system = fallback_req(Some("another app"), serde_json::json!("question one"), 0);
+        let id = content_session_id(&base, 1).unwrap();
+        assert_ne!(id, content_session_id(&other_message, 1).unwrap());
+        assert_ne!(id, content_session_id(&other_system, 1).unwrap());
+        assert_ne!(id, content_session_id(&base, 2).unwrap(), "不同入口 Key 不应互相粘在一起");
+    }
+
+    #[test]
+    fn content_session_id_ignores_dynamic_tail_of_system_and_refuses_empty_text() {
+        let long_prefix = "A".repeat(FINGERPRINT_SYSTEM_CHARS);
+        let a = fallback_req(Some(&format!("{long_prefix} now=10:00")), serde_json::json!("hi"), 0);
+        let b = fallback_req(Some(&format!("{long_prefix} now=10:05")), serde_json::json!("hi"), 1);
+        assert_eq!(content_session_id(&a, 1), content_session_id(&b, 1));
+
+        let image_only = fallback_req(
+            Some("sys"),
+            serde_json::json!([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]),
+            0,
+        );
+        assert_eq!(content_session_id(&image_only, 1), None);
+    }
+
+    #[test]
+    fn has_session_id_detects_client_supplied_ids_only() {
+        use super::super::types::Metadata;
+        let mut req = fallback_req(None, serde_json::json!("hi"), 0);
+        assert!(!has_session_id(&req));
+        req.metadata = Some(Metadata { user_id: Some("user_abc".to_string()) });
+        assert!(!has_session_id(&req));
+        req.metadata = Some(Metadata {
+            user_id: Some("user_abc_account__session_a0662283-7fd3-4399-a7eb-52b9a717ae88".to_string()),
+        });
+        assert!(has_session_id(&req));
     }
 
     #[test]

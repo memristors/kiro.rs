@@ -32,7 +32,10 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use super::converter::{ConversionError, convert_request_with_mode, get_context_window_size};
+use super::converter::{
+    ConversionError, content_session_id, convert_request_with_mode, get_context_window_size,
+    has_session_id,
+};
 use super::middleware::{AppState, KeyContext};
 use super::stream::{SseEvent, StreamContext};
 use super::types::{
@@ -829,6 +832,23 @@ pub async fn get_models(
 /// POST /v1/messages
 ///
 /// 创建消息（对话）
+/// 客户端没带会话 id 时，用请求内容派生一个，让粘性路由对中转层（new-api 等）转发的请求也生效。
+/// 粘性路由关闭时不做：没有收益，还会白白改写 conversationId。
+fn ensure_session_metadata(
+    payload: &mut MessagesRequest,
+    key_id: u64,
+    provider: &crate::kiro::provider::KiroProvider,
+) {
+    if has_session_id(payload) || !provider.token_manager().session_affinity().is_enabled() {
+        return;
+    }
+    if let Some(user_id) = content_session_id(payload, key_id) {
+        payload.metadata = Some(super::types::Metadata {
+            user_id: Some(user_id),
+        });
+    }
+}
+
 pub async fn post_messages(
     State(state): State<AppState>,
     Extension(key_ctx): Extension<KeyContext>,
@@ -876,6 +896,7 @@ pub async fn post_messages(
 
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
+    ensure_session_metadata(&mut payload, key_ctx.key_id, &provider);
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
@@ -2058,6 +2079,7 @@ pub async fn post_messages_cc(
 
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
+    ensure_session_metadata(&mut payload, key_ctx.key_id, &provider);
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
