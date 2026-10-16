@@ -15,7 +15,7 @@ use super::{
         complete_social_relogin, create_client_key, create_group, delete_client_key,
         delete_credential, delete_group, delete_proxy, disable_quota_exceeded, enable_overage_all,
         export_credentials, force_refresh_token, get_account_rpm_limit_config,
-        get_account_throttle_config, get_all_credentials, get_backups, run_backup, stats_credit_history,
+        get_account_throttle_config, get_all_credentials, get_backups, run_backup, stats_credit_history, diagnose_proxy,
         get_credential_balance, get_credential_metadata_schema, get_credential_models,
         get_current_models, get_global_proxy, get_custom_models,
         get_cache_metering_config, get_session_affinity_config,
@@ -101,6 +101,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/proxy-pool", get(get_proxy_pool).post(add_proxy))
         .route("/proxy-pool/batch", post(batch_add_proxies))
         .route("/proxy-pool/check-all", post(check_all_proxies))
+        .route("/proxy-pool/diagnose", post(diagnose_proxy))
         .route(
             "/proxy-pool/assign-round-robin",
             post(assign_proxies_round_robin),

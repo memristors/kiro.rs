@@ -34,6 +34,7 @@ use crate::kiro::token_manager::{
 use crate::model::config::Config;
 
 use super::error::AdminServiceError;
+use super::net_check::{self, NetworkCheckResult};
 use super::proxy_pool::{GetUrlResult, ProxyPoolManager};
 use super::types::{
     AccountRpmLimitConfigResponse, AccountThrottleConfigResponse, AddCredentialRequest,
@@ -3101,6 +3102,66 @@ impl AdminService {
             enabled: entry.enabled,
             auto_disabled: entry.auto_disabled,
         })
+    }
+
+    /// 网络诊断：通过某个代理查询出口 IP 的归属地/运营商，并测试几个站点的连通与延迟。
+    ///
+    /// 目标代理按 `proxyId` → `credentialId` → `proxyUrl` → 全局代理/直连 的顺序取第一个给出的。
+    /// 测试目标固定在服务端，调用方只能选择走哪个代理。
+    pub async fn diagnose_proxy(
+        &self,
+        req: super::types::ProxyDiagnoseRequest,
+    ) -> Result<NetworkCheckResult, AdminServiceError> {
+        let global = self.token_manager.proxy();
+        let proxy: Option<ProxyConfig> = if let Some(proxy_id) = req.proxy_id {
+            // 被禁用的代理也允许诊断，方便判断是否可以重新启用
+            let entry = self
+                .proxy_pool
+                .list()
+                .into_iter()
+                .find(|e| e.id == proxy_id)
+                .ok_or(AdminServiceError::NotFound { id: proxy_id })?;
+            Some(ProxyConfig::new(entry.url))
+        } else if let Some(credential_id) = req.credential_id {
+            let credential = self
+                .token_manager
+                .clone_credential(credential_id)
+                .ok_or(AdminServiceError::NotFound { id: credential_id })?;
+            credential.effective_proxy(global.as_ref())
+        } else if let Some(url) = req.proxy_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            let lower = url.to_ascii_lowercase();
+            let valid = [
+                "http://",
+                "https://",
+                "socks4://",
+                "socks4a://",
+                "socks5://",
+                "socks5h://",
+            ]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme));
+            if !valid {
+                return Err(AdminServiceError::InvalidCredential(
+                    "代理 URL 格式无效，需以 http://、https://、socks4://、socks4a://、socks5:// 或 socks5h:// 开头"
+                        .to_string(),
+                ));
+            }
+            let mut proxy = ProxyConfig::new(url);
+            if let (Some(username), Some(password)) = (
+                req.proxy_username.as_deref().filter(|s| !s.is_empty()),
+                req.proxy_password.as_deref().filter(|s| !s.is_empty()),
+            ) {
+                proxy = proxy.with_auth(username, password);
+            }
+            Some(proxy)
+        } else {
+            global
+        };
+
+        let tls_backend = self.token_manager.config().tls_backend;
+        net_check::run(proxy, tls_backend)
+            .await
+            .map_err(|e| AdminServiceError::InvalidCredential(format!("{:#}", e)))
     }
 
     /// 触发全部代理的健康检查
