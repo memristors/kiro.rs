@@ -16,7 +16,7 @@ use super::{
         delete_credential, delete_group, delete_proxy, disable_quota_exceeded, enable_overage_all,
         export_credentials, force_refresh_token, get_account_rpm_limit_config,
         get_account_throttle_config, get_all_credentials, get_backups, run_backup, stats_credit_history, diagnose_proxy,
-        get_auto_proxy, set_auto_proxy,
+        get_auto_proxy, set_auto_proxy, get_queue_config, set_queue_config, list_live_requests,
         get_credential_balance, get_credential_metadata_schema, get_credential_models,
         get_current_models, get_global_proxy, get_custom_models,
         get_cache_metering_config, get_session_affinity_config,
@@ -164,6 +164,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         .route("/config/admin-key", put(update_admin_key))
         .route("/config/auto-proxy", get(get_auto_proxy).put(set_auto_proxy))
+        .route("/config/queue", get(get_queue_config).put(set_queue_config))
         .route("/system/update/pull", post(pull_update_image))
         .route("/system/update/apply", post(apply_image_update))
         .route("/system/update/rollback", post(rollback_image_update))
@@ -224,6 +225,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/by-key", get(stats_by_key))
         .route("/stats/credit-history", get(stats_credit_history))
         .route("/traces/failure-stats", get(trace_failure_stats))
+        .route("/traces/live", get(list_live_requests))
         .route("/traces", get(list_traces))
         .route("/backups", get(get_backups))
         .route("/backups/run", post(run_backup))

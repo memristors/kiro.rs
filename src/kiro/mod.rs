@@ -8,5 +8,6 @@ pub mod machine_id;
 pub mod model;
 pub mod parser;
 pub mod provider;
+pub mod queue;
 pub mod session_affinity;
 pub mod token_manager;

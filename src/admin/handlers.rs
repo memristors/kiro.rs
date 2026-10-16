@@ -588,6 +588,37 @@ pub async fn set_account_throttle_config(
     }
 }
 
+/// GET /api/admin/traces/live
+/// 正在进行的请求及其阶段（queued 排队 / connecting 连接中 / generating 等首字 / streaming 输出中），
+/// 附带当前排队人数和各账号在途请求数。请求结束后进入 `/traces` 的历史记录。
+pub async fn list_live_requests(State(state): State<AdminState>) -> impl IntoResponse {
+    let queue = state.service.get_queue_config();
+    Json(serde_json::json!({
+        "requests": super::live::snapshot(),
+        "waiting": queue.waiting,
+        "inFlight": queue.in_flight,
+        "accountMaxConcurrency": queue.account_max_concurrency,
+    }))
+}
+
+/// GET /api/admin/config/queue
+/// 排队等待 / 单账号并发上限 / 渐进冷却配置，附带实时排队数和各账号在途请求数
+pub async fn get_queue_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_queue_config())
+}
+
+/// PUT /api/admin/config/queue
+/// 更新排队 / 并发 / 渐进冷却配置（省略的字段保持不变），立即生效并写入 config.json
+pub async fn set_queue_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::types::SetQueueConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_queue_config(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/config/model-api-retry
 /// 获取普通模型 API 429 自动重试配置
 pub async fn get_model_api_retry_config(State(state): State<AdminState>) -> impl IntoResponse {

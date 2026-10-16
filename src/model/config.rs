@@ -245,6 +245,28 @@ pub struct Config {
     #[serde(default = "default_account_rpm_limit")]
     pub account_rpm_limit: u32,
 
+    /// 账号被限流后的**首次**冷却秒数（默认 20）。连续被限流时按 2 倍递增，
+    /// 上限是 `account_throttle_cooldown_secs`；一次成功请求就清零。上游给了 Retry-After 时以它为准。
+    #[serde(default = "default_account_throttle_cooldown_base_secs")]
+    pub account_throttle_cooldown_base_secs: u64,
+
+    /// 没有账号立即可用、但只是暂时的（冷却中 / RPM 用尽 / 并发已满）时，请求是否排队等待
+    /// 而不是立刻失败（默认开启）。
+    #[serde(default = "default_queue_enabled")]
+    pub queue_enabled: bool,
+
+    /// 排队等待的最长秒数（默认 30）。超时返回 429 并带 Retry-After。
+    #[serde(default = "default_queue_max_wait_secs")]
+    pub queue_max_wait_secs: u64,
+
+    /// 同时排队等待的请求数上限（默认 64）。队列满时新请求直接 429 + Retry-After。
+    #[serde(default = "default_queue_max_waiters")]
+    pub queue_max_waiters: u32,
+
+    /// 单账号并发上限（默认 0，即不限制）。超出的请求排队等待该账号或其它账号有空位。
+    #[serde(default)]
+    pub account_max_concurrency: u32,
+
     /// 是否识别 403 账号封禁文案并立即禁用凭据（默认 true）。
     ///
     /// 开启后：某凭据收到 403 且响应体命中明确封禁文案（同时含 "suspended" 与
@@ -470,6 +492,22 @@ fn default_model_api_429_retry_enabled() -> bool {
     true
 }
 
+fn default_account_throttle_cooldown_base_secs() -> u64 {
+    crate::kiro::queue::DEFAULT_COOLDOWN_BASE_SECS
+}
+
+fn default_queue_enabled() -> bool {
+    true
+}
+
+fn default_queue_max_wait_secs() -> u64 {
+    crate::kiro::queue::DEFAULT_QUEUE_MAX_WAIT_SECS
+}
+
+fn default_queue_max_waiters() -> u32 {
+    crate::kiro::queue::DEFAULT_QUEUE_MAX_WAITERS
+}
+
 fn default_account_rpm_limit_enabled() -> bool {
     false
 }
@@ -569,6 +607,11 @@ impl Default for Config {
             proxy_url: None,
             proxy_username: None,
             proxy_password: None,
+            account_throttle_cooldown_base_secs: default_account_throttle_cooldown_base_secs(),
+            queue_enabled: default_queue_enabled(),
+            queue_max_wait_secs: default_queue_max_wait_secs(),
+            queue_max_waiters: default_queue_max_waiters(),
+            account_max_concurrency: 0,
             auto_proxy_enabled: false,
             auto_proxy_url: None,
             auto_proxy_username_template: None,

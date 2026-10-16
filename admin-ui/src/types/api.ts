@@ -620,6 +620,8 @@ export interface TraceRecord {
   credits?: number
   /** 首 Token 延迟（毫秒，仅流式有值） */
   firstTokenMs?: number | null
+  /** 累计排队等待毫秒数（没有账号立即可用时在队列里等的时间）；0 或缺省 = 没排队 */
+  queueMs?: number
   /** 发给上游的 conversationId；同一会话多轮共享，可据此串起整个会话 */
   sessionId?: string | null
   /** 会话粘性路由结果：hit / miss_first / miss_unavailable / off；老记录为 null */

@@ -875,6 +875,41 @@ pub struct SetAutoProxyRequest {
     pub password: Option<String>,
 }
 
+/// 排队 / 并发 / 渐进冷却配置响应（含实时状态）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueConfigResponse {
+    /// 账号被限流后的首次冷却秒数
+    pub cooldown_base_secs: u64,
+    /// 冷却上限秒数（即「账号级限流冷却时长」）
+    pub cooldown_max_secs: u64,
+    pub queue_enabled: bool,
+    pub queue_max_wait_secs: u64,
+    pub queue_max_waiters: u32,
+    /// 单账号并发上限，0 表示不限
+    pub account_max_concurrency: u32,
+    /// 当前正在排队等待的请求数
+    pub waiting: usize,
+    /// 各账号当前在途请求数（只含 >0 的）
+    pub in_flight: std::collections::HashMap<u64, u32>,
+}
+
+/// 设置排队 / 并发 / 渐进冷却请求；省略的字段保持不变
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetQueueConfigRequest {
+    #[serde(default)]
+    pub cooldown_base_secs: Option<u64>,
+    #[serde(default)]
+    pub queue_enabled: Option<bool>,
+    #[serde(default)]
+    pub queue_max_wait_secs: Option<u64>,
+    #[serde(default)]
+    pub queue_max_waiters: Option<u32>,
+    #[serde(default)]
+    pub account_max_concurrency: Option<u32>,
+}
+
 /// 设置全局代理请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

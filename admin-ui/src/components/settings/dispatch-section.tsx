@@ -21,6 +21,7 @@ import {
   useFieldSaver,
 } from '@/components/console/setting-row'
 import { reportSaveError } from '@/components/settings/report-error'
+import { QueueGroup } from '@/components/settings/queue-group'
 
 const SECS_PER_MIN = 60
 // 与后端 SetAccountRpmLimitConfigRequest 的校验区间保持一致
@@ -39,6 +40,7 @@ export function DispatchSection() {
     <div className="space-y-6">
       <LoadBalancingGroup />
       <RateLimitHandlingGroup />
+      <QueueGroup />
       <RpmLimitGroup />
       <QuotaResetRecoveryGroup />
       <SelfHealGroup />
@@ -104,8 +106,8 @@ function RateLimitHandlingGroup() {
         disabled={throttleLoading}
       />
       <SettingNumber
-        label="账号冷却时长"
-        hint="被账号级限流的凭据要静默多久才重新参与调度"
+        label="账号冷却时长（上限）"
+        hint="被账号级限流的凭据最长静默多久。连续被限流时冷却从下方「首次冷却」逐步加长，最多到这里；上游给了 Retry-After 时以它为准"
         value={cooldownSecs}
         toDisplay={(secs) => Math.round(secs / SECS_PER_MIN)}
         fromDisplay={(min) => min * SECS_PER_MIN}

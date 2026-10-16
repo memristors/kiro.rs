@@ -2520,6 +2520,43 @@ impl AdminService {
         }
     }
 
+    /// 排队 / 并发 / 渐进冷却配置，附带实时排队数和各账号在途请求数
+    pub fn get_queue_config(&self) -> super::types::QueueConfigResponse {
+        let settings = self.token_manager.queue_settings();
+        let gate = self.token_manager.gate();
+        super::types::QueueConfigResponse {
+            cooldown_base_secs: settings.cooldown_base_secs,
+            cooldown_max_secs: self.token_manager.get_account_throttle_cooldown_secs(),
+            queue_enabled: settings.queue_enabled,
+            queue_max_wait_secs: settings.queue_max_wait_secs,
+            queue_max_waiters: settings.queue_max_waiters,
+            account_max_concurrency: settings.account_max_concurrency,
+            waiting: gate.waiting(),
+            in_flight: gate.snapshot(),
+        }
+    }
+
+    /// 更新排队 / 并发 / 渐进冷却配置；省略的字段保持不变，立即生效并写入 config.json
+    pub fn set_queue_config(
+        &self,
+        req: super::types::SetQueueConfigRequest,
+    ) -> Result<super::types::QueueConfigResponse, AdminServiceError> {
+        let current = self.token_manager.queue_settings();
+        let new = crate::kiro::queue::QueueSettings {
+            cooldown_base_secs: req.cooldown_base_secs.unwrap_or(current.cooldown_base_secs),
+            queue_enabled: req.queue_enabled.unwrap_or(current.queue_enabled),
+            queue_max_wait_secs: req.queue_max_wait_secs.unwrap_or(current.queue_max_wait_secs),
+            queue_max_waiters: req.queue_max_waiters.unwrap_or(current.queue_max_waiters),
+            account_max_concurrency: req
+                .account_max_concurrency
+                .unwrap_or(current.account_max_concurrency),
+        };
+        self.token_manager
+            .set_queue_settings(new)
+            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        Ok(self.get_queue_config())
+    }
+
     /// 更新账号级 429 限流故障转移配置
     pub fn set_account_throttle_config(
         &self,
