@@ -147,6 +147,33 @@ export interface DiagnoseTarget {
   proxyPassword?: string
 }
 
+// ---------- 新凭据自动代理 ----------
+
+export interface AutoProxyConfig {
+  enabled: boolean
+  proxyUrl: string | null
+  /** `{id}` 会被替换成新凭据的 ID */
+  usernameTemplate: string | null
+  passwordSet: boolean
+}
+
+export interface SetAutoProxyRequest {
+  enabled: boolean
+  proxyUrl?: string | null
+  usernameTemplate?: string | null
+  /** 省略表示保留现有密码，空字符串表示清除 */
+  password?: string
+}
+
+export async function getAutoProxy(): Promise<AutoProxyConfig> {
+  const { data } = await api.get<AutoProxyConfig>('/config/auto-proxy')
+  return data
+}
+
+export async function setAutoProxy(body: SetAutoProxyRequest): Promise<void> {
+  await api.put('/config/auto-proxy', body)
+}
+
 export async function diagnoseProxy(target: DiagnoseTarget): Promise<NetworkCheckResult> {
   // 单次诊断最长约 8s（IP）+ 10s（站点）并行，留足余量
   const { data } = await api.post<NetworkCheckResult>('/proxy-pool/diagnose', target, {
