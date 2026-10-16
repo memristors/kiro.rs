@@ -586,8 +586,21 @@ export interface TraceAttempt {
 }
 
 /** 一个外部请求的完整链路 */
+/** 仍在处理中的请求（仅前端合成，来自 /traces/live，不是数据库记录） */
+export interface TraceLiveInfo {
+  stage: 'queued' | 'connecting' | 'generating' | 'streaming'
+  attempt: number
+  /** 取数那一刻的总耗时 / 排队耗时（毫秒） */
+  elapsedMs: number
+  queuedMs: number
+  /** 取数时间戳，用来把耗时在两次轮询之间推算得连续 */
+  fetchedAt: number
+}
+
 export interface TraceRecord {
   traceId: string
+  /** 有值 = 这是一条进行中的请求（合成行），结束后会被真正的记录替换 */
+  live?: TraceLiveInfo
   ts: string
   keyId: number
   /** masterApiKey = 历史 master 调用（已下线）；clientKey = 客户端 Key */

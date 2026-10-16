@@ -5,7 +5,7 @@ import { useLiveRequests } from '@/hooks/use-ops'
 import { cn } from '@/lib/utils'
 
 /** 阶段 → 文案、说明和颜色。「排队」「处理」「输出」分得越清楚，越容易判断请求是卡住了还是在等。 */
-const STAGES: Record<LiveStage, { label: string; hint: string; className: string; pulse: boolean }> = {
+export const STAGES: Record<LiveStage, { label: string; hint: string; className: string; pulse: boolean }> = {
   queued: {
     label: '排队中',
     hint: '没有账号立即可用（冷却中 / 并发已满），在等待队列里',
@@ -34,7 +34,7 @@ const STAGES: Record<LiveStage, { label: string; hint: string; className: string
 
 const STAGE_ORDER: LiveStage[] = ['queued', 'connecting', 'generating', 'streaming']
 
-function formatMs(ms: number): string {
+export function formatMs(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   const minutes = Math.floor(ms / 60_000)
@@ -43,7 +43,7 @@ function formatMs(ms: number): string {
 }
 
 /** 每 500ms 刷新一次的「现在」，让耗时在两次轮询之间也能走动 */
-function useNow(intervalMs = 500): number {
+export function useNow(intervalMs = 500): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), intervalMs)
@@ -56,7 +56,7 @@ function useNow(intervalMs = 500): number {
  * 请求日志页顶部的「进行中」面板：正在处理的请求逐条显示阶段、账号、已用时间。
  * 请求结束后消失，进入下方的历史列表（成功 / 失败 / 中断）。
  */
-export function LiveRequestsPanel() {
+export function LiveRequestsPanel({ compact = false }: { compact?: boolean }) {
   const { data, dataUpdatedAt } = useLiveRequests()
   const now = useNow()
   const requests = data?.requests ?? []
@@ -68,7 +68,12 @@ export function LiveRequestsPanel() {
 
   return (
     <div className="rounded-lg border border-border/60 bg-card">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border/50 px-3 py-2">
+      <div
+        className={cn(
+          'flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2',
+          !compact && 'border-b border-border/50',
+        )}
+      >
         <span className="inline-flex items-center gap-1.5 text-sm font-medium">
           <Activity className="h-4 w-4 text-primary" />
           进行中
@@ -87,6 +92,9 @@ export function LiveRequestsPanel() {
             <span className="console-num font-medium">{counts[stage]}</span>
           </span>
         ))}
+        {compact && requests.length > 0 && (
+          <span className="text-[11px] text-muted-foreground">明细见下方列表最上面几行</span>
+        )}
         {data && data.accountMaxConcurrency > 0 && (
           <span className="ml-auto text-[11px] text-muted-foreground">
             单账号并发上限 {data.accountMaxConcurrency}
@@ -94,7 +102,7 @@ export function LiveRequestsPanel() {
         )}
       </div>
 
-      {requests.length === 0 ? (
+      {compact ? null : requests.length === 0 ? (
         <div className="px-3 py-3 text-xs text-muted-foreground">当前没有进行中的请求</div>
       ) : (
         <ul className="divide-y divide-border/40">

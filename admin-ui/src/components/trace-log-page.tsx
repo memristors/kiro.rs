@@ -47,7 +47,8 @@ import {
 } from '@/components/console/rail'
 import type { TraceAttempt, TraceQuery, TraceRecord, UsageSource } from '@/types/api'
 import { displayEmail, usePrivacyMask } from '@/lib/privacy'
-import { LiveRequestsPanel } from '@/components/live-requests-panel'
+import { LiveRequestsPanel, STAGES, formatMs, useNow } from '@/components/live-requests-panel'
+import { useLiveRequests } from '@/hooks/use-ops'
 
 /** 失败分类 → 中文标签 + Badge 颜色 */
 function outcomeStyle(outcome: string): {
@@ -91,12 +92,53 @@ function outcomeDot(outcome: string): string {
 
 /** 整条 trace 的严重度 → 左侧色轨 */
 function traceTone(rec: TraceRecord): RailTone {
+  if (rec.live) return rec.live.stage === 'queued' ? 'warn' : 'none'
   if (rec.finalStatus === 'success') {
     // 成功但重试过：请求被救回来了，可池子里有凭据在失败 —— 值得看一眼，但不是故障
     return rec.totalAttempts > 1 ? 'warn' : 'none'
   }
   if (rec.finalStatus === 'interrupted') return 'warn'
   return outcomeTone(rec.errorType ?? '')
+}
+
+/** 进行中请求的阶段徽章：排队中 / 连接上游 / 生成中 / 输出中 */
+function LiveStageBadge({ stage }: { stage: NonNullable<TraceRecord['live']>['stage'] }) {
+  const meta = STAGES[stage]
+  return (
+    <span
+      title={meta.hint}
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium ${meta.className}`}
+    >
+      <span className="relative flex h-1.5 w-1.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-60" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+      </span>
+      {meta.label}
+    </span>
+  )
+}
+
+/** 进行中请求的耗时：在两次轮询之间也持续走动 */
+function LiveDurationCell({ live }: { live: NonNullable<TraceRecord['live']> }) {
+  const now = useNow()
+  const drift = Math.max(0, now - live.fetchedAt)
+  const queued = live.queuedMs + (live.stage === 'queued' ? drift : 0)
+  return (
+    <span className="inline-flex flex-col text-[11px] leading-tight">
+      <span className="whitespace-nowrap">
+        <span className="text-[10px] text-muted-foreground/70">已用 </span>
+        <span className="font-mono tabular-nums">{formatMs(live.elapsedMs + drift)}</span>
+      </span>
+      {queued >= 500 && (
+        <span className="whitespace-nowrap">
+          <span className="text-[10px] text-muted-foreground/70">排队 </span>
+          <span className="font-mono tabular-nums text-amber-600 dark:text-amber-400">
+            {formatMs(queued)}
+          </span>
+        </span>
+      )}
+    </span>
+  )
 }
 
 /** 最终状态 → 徽章 */
@@ -947,30 +989,47 @@ function useTraceColumns(): ConsoleColumn<TraceRecord>[] {
       {
         id: 'status',
         header: '状态',
-        cell: (r) => <StatusBadge status={r.finalStatus} />,
+        cell: (r) =>
+          r.live ? <LiveStageBadge stage={r.live.stage} /> : <StatusBadge status={r.finalStatus} />,
       },
       {
         id: 'credential',
         header: '最终凭据',
         hint: '绿色图钉 = 沿用上一轮账号（粘性命中）；橙色 = 与上一轮不同账号（换号，上游缓存大概率作废）',
-        cell: (r) => (
+        cell: (r) =>
+          r.live ? (
+            <span className="text-muted-foreground">
+              {r.finalCredentialId > 0 ? `#${r.finalCredentialId}` : '—'}
+            </span>
+          ) : (
           <span className="inline-flex max-w-[230px] items-center gap-1.5">
             <span className="truncate">{credLabel(r.finalCredentialId, r.finalEmail)}</span>
             <StickyMarker rec={r} />
           </span>
-        ),
+          ),
       },
       {
         id: 'chain',
         header: '故障转移',
         hint: '这次请求走过的重试链路，顺序即尝试次序',
-        cell: (r) => <AttemptChain rec={r} />,
+        cell: (r) =>
+          r.live ? (
+            r.live.attempt > 1 ? (
+              <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                第 {r.live.attempt} 次尝试
+              </span>
+            ) : (
+              <span className="text-muted-foreground/50">—</span>
+            )
+          ) : (
+            <AttemptChain rec={r} />
+          ),
       },
       {
         id: 'tokens',
         header: 'Token',
         hint: '未缓存输入 / 输出；缓存↓读取 ↑写入',
-        cell: (r) => <TokenCell rec={r} />,
+        cell: (r) => (r.live ? <span className="text-muted-foreground">…</span> : <TokenCell rec={r} />),
       },
       {
         id: 'credits',
@@ -987,7 +1046,7 @@ function useTraceColumns(): ConsoleColumn<TraceRecord>[] {
         id: 'duration',
         header: '耗时',
         hint: '首字 = 首个 token 到达耗时（仅流式有值，非流式为 —）；总耗时 = 端到端。绿=正常及更快，黄=偏慢，红=很慢；两者阈值不同，悬浮数值看当前档位',
-        cell: (r) => <DurationCell rec={r} />,
+        cell: (r) => (r.live ? <LiveDurationCell live={r.live} /> : <DurationCell rec={r} />),
       },
       {
         id: 'key',
@@ -1115,7 +1174,72 @@ export function TraceLogPage() {
     offset: page * PAGE_SIZE,
   }
   const { data, isLoading, isFetching, refetch } = useTraces(query)
-  const records = data?.records ?? []
+  const { data: liveData, dataUpdatedAt: liveUpdatedAt } = useLiveRequests()
+
+  // 进行中的请求直接作为列表最上面的行：来一条就出现（排队中），阶段变化就地更新，
+  // 结束后消失并立刻重新拉列表，由真正的 成功 / 失败 / 中断 记录接替。
+  // 只在第一页、且筛选条件不会把进行中的请求排除时显示（状态 / 错误类型 / 换号 / 搜索 / 会话 / IP / 分组筛选下不显示）。
+  const showLive =
+    page === 0 &&
+    !url.status &&
+    !url.errorType &&
+    !url.switched &&
+    !url.q &&
+    !url.session &&
+    !url.ip &&
+    !url.group
+  const liveKeyId = query.keyId
+  const liveRows = useMemo<TraceRecord[]>(() => {
+    if (!showLive || !liveData) return []
+    return [...liveData.requests]
+      .filter((r) => !liveKeyId || r.keyId === liveKeyId)
+      .sort((a, b) => a.elapsedMs - b.elapsedMs)
+      .map((r) => ({
+        traceId: r.traceId,
+        ts: r.ts,
+        keyId: r.keyId,
+        keySource: 'clientKey' as const,
+        model: r.model,
+        isStream: r.isStream,
+        finalStatus: 'live',
+        finalCredentialId: r.credentialId,
+        errorType: null,
+        errorMessage: null,
+        totalAttempts: r.attempt,
+        durationMs: r.elapsedMs,
+        interruptedAfterBytes: null,
+        clientIp: r.clientIp ?? null,
+        attempts: [],
+        live: {
+          stage: r.stage,
+          attempt: r.attempt,
+          elapsedMs: r.elapsedMs,
+          queuedMs: r.queuedMs,
+          fetchedAt: liveUpdatedAt,
+        },
+      }))
+  }, [showLive, liveData, liveUpdatedAt, liveKeyId])
+
+  // 有请求结束（从进行中名单里消失）就马上刷新列表，不等 30 秒的定时刷新
+  const prevLiveIds = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const current = new Set((liveData?.requests ?? []).map((r) => r.traceId))
+    let finished = false
+    prevLiveIds.current.forEach((id) => {
+      if (!current.has(id)) finished = true
+    })
+    prevLiveIds.current = current
+    if (finished) void refetch()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveData])
+
+  const dbRecords = useMemo(() => data?.records ?? [], [data])
+  // 刚结束的请求在数据库记录出现前后可能同时存在于两边，按 traceId 去重，以真实记录为准
+  const records = useMemo(() => {
+    if (liveRows.length === 0) return dbRecords
+    const known = new Set(dbRecords.map((r) => r.traceId))
+    return [...liveRows.filter((r) => !known.has(r.traceId)), ...dbRecords]
+  }, [liveRows, dbRecords])
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const columns = useTraceColumns()
@@ -1163,7 +1287,7 @@ export function TraceLogPage() {
       />
 
       {/* 进行中的请求：排队 / 连接上游 / 生成中 / 输出中；结束后进入下方历史 */}
-      <LiveRequestsPanel />
+      <LiveRequestsPanel compact={showLive} />
 
       {/* 筛选栏：时间范围在最前，因为排查的第一句话通常是"刚才那几分钟" */}
       <div className="flex flex-wrap items-center gap-2">
@@ -1283,13 +1407,19 @@ export function TraceLogPage() {
         selectable
         selected={selectedTraceIds}
         onSelectedChange={setSelectedTraceIds}
-        renderExpandedRow={(rec) => (
-          <TraceExpandedDetail
-            rec={rec}
-            onFilterSession={filterSession}
-            onFilterIp={filterIp}
-          />
-        )}
+        renderExpandedRow={(rec) =>
+          rec.live ? (
+            <div className="px-4 py-3 text-xs text-muted-foreground">
+              请求仍在处理中：{STAGES[rec.live.stage].hint}。结束后这里会变成完整的链路详情。
+            </div>
+          ) : (
+            <TraceExpandedDetail
+              rec={rec}
+              onFilterSession={filterSession}
+              onFilterIp={filterIp}
+            />
+          )
+        }
         expandedKeys={expandedTraceIds}
         onExpandedKeysChange={setExpandedTraceIds}
         columnsStorageKey="kiro.traces.columns"
