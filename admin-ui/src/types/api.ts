@@ -89,6 +89,10 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  /** 代理认证用户名（不是密钥，可展示）；密码不会返回 */
+  proxyUsername?: string
+  /** 是否已配置代理密码 */
+  hasProxyPassword?: boolean
   refreshFailureCount: number
   disabledReason?: string
   /** 账号级限流冷却剩余秒数（>0 表示冷却中） */

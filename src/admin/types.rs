@@ -71,6 +71,11 @@ pub struct CredentialStatusItem {
     /// 代理 URL（用于前端展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// 代理认证用户名（用户名不是密钥，可直接展示；密码从不返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_username: Option<String>,
+    /// 是否已配置代理密码（只告知有无，不返回内容）
+    pub has_proxy_password: bool,
     /// Token 刷新连续失败次数
     pub refresh_failure_count: u32,
     /// 禁用原因

@@ -857,6 +857,8 @@ impl AdminService {
                     last_used_at: entry.last_used_at.clone(),
                     has_proxy: entry.has_proxy,
                     proxy_url: entry.proxy_url,
+                    proxy_username: entry.proxy_username,
+                    has_proxy_password: entry.has_proxy_password,
                     refresh_failure_count: entry.refresh_failure_count,
                     disabled_reason: entry.disabled_reason,
                     endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),

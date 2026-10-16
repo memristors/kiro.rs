@@ -1454,6 +1454,14 @@ function CredentialCardImpl({
                       >
                         {proxyDisplayLabel(credential.proxyUrl ?? "")}
                       </span>
+                      {credential.proxyUsername && (
+                        <span
+                          className="ml-1.5 font-mono text-[11px] text-muted-foreground"
+                          title="代理认证用户名"
+                        >
+                          {credential.proxyUsername}
+                        </span>
+                      )}
                       {proxyEntry && proxyUnhealthy && (
                         <span className="ml-1.5 text-[11px] font-medium text-destructive">
                           {proxyEntry.autoDisabled ? '已自动禁用' : `异常 ×${proxyEntry.consecutiveFailures}`}
