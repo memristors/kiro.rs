@@ -13,6 +13,7 @@ import { useUpdateConfig, useSetUpdateConfig } from '@/hooks/use-credentials'
 import { useUpdateCheck } from '@/hooks/use-update-check'
 import { ImageUpdateDialog } from '@/components/image-update-dialog'
 import { reportSaveError } from '@/components/settings/report-error'
+import { BackupGroup } from '@/components/settings/backup-group'
 
 /**
  * 系统分区：镜像在线更新的**配置**。
@@ -37,6 +38,7 @@ export function SystemSection() {
   return (
     <>
       <div className="space-y-6">
+        <BackupGroup />
         <SettingGroup
           title="版本"
           description="镜像更新的执行入口在更新面板里；这里只配自动化策略"

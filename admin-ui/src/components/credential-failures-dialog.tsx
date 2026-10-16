@@ -8,6 +8,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { useTraces } from "@/hooks/use-traces";
 import type { TraceAttempt, TraceRecord } from "@/types/api";
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 interface CredentialFailuresDialogProps {
   open: boolean;
@@ -59,6 +60,7 @@ export function CredentialFailuresDialog({
   credentialId,
   email,
 }: CredentialFailuresDialogProps) {
+  usePrivacyMask()
   const { data, isLoading } = useTraces(
     { failedAttemptCredentialId: credentialId, limit: 50 },
     open,
@@ -77,7 +79,7 @@ export function CredentialFailuresDialog({
         <DialogHeader>
           <DialogTitle>失败日志详情</DialogTitle>
           <DialogDescription>
-            {email || `凭据 #${credentialId}`} 最近的失败记录（最多 50 条请求）
+            {displayEmail(email) || `凭据 #${credentialId}`} 最近的失败记录（最多 50 条请求）
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-2 overflow-y-auto">

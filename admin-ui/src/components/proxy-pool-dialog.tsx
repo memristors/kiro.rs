@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   XCircle,
   HelpCircle,
+  Radar,
 } from 'lucide-react'
 import {
   Dialog,
@@ -36,6 +37,7 @@ import {
   assignProxiesRoundRobin,
 } from '@/api/credentials'
 import { extractErrorMessage, maskProxyUrl } from '@/lib/utils'
+import { ProxyDiagnoseDialog } from '@/components/proxy-diagnose-dialog'
 import type { ProxyPoolEntry } from '@/types/api'
 
 interface ProxyPoolDialogProps {
@@ -48,6 +50,7 @@ interface ProxyPoolDialogProps {
 
 export function ProxyPoolDialog({ open, onOpenChange, onSelectProxy }: ProxyPoolDialogProps) {
   const [newUrl, setNewUrl] = useState('')
+  const [diagnoseProxy, setDiagnoseProxy] = useState<ProxyPoolEntry | null>(null)
   const [newLabel, setNewLabel] = useState('')
   const [batchText, setBatchText] = useState('')
   const [showBatch, setShowBatch] = useState(false)
@@ -381,6 +384,16 @@ export function ProxyPoolDialog({ open, onOpenChange, onSelectProxy }: ProxyPool
                       <Activity className="h-3 w-3 mr-1" />
                       {checkingId === proxy.id ? '测试中' : '测试'}
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => setDiagnoseProxy(proxy)}
+                      title="查看出口 IP 归属地、运营商，以及 Kiro 链路和常用站点的延迟"
+                    >
+                      <Radar className="h-3 w-3 mr-1" />
+                      诊断
+                    </Button>
                     {onSelectProxy && proxy.enabled && (
                       <Button
                         size="sm"
@@ -439,6 +452,14 @@ export function ProxyPoolDialog({ open, onOpenChange, onSelectProxy }: ProxyPool
           </div>
         </div>
       </DialogContent>
+      <ProxyDiagnoseDialog
+        open={diagnoseProxy !== null}
+        onOpenChange={(next) => {
+          if (!next) setDiagnoseProxy(null)
+        }}
+        target={diagnoseProxy ? { proxyId: diagnoseProxy.id } : {}}
+        subject={diagnoseProxy ? maskProxyUrl(diagnoseProxy.url) : undefined}
+      />
     </Dialog>
   )
 }

@@ -9,6 +9,8 @@ import {
   Boxes,
   HeartPulse,
   HeartCrack,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -32,6 +34,8 @@ import { useUpdateCheck } from '@/hooks/use-update-check'
 import { extractErrorMessage } from '@/lib/utils'
 import { ImageUpdateDialog } from '@/components/image-update-dialog'
 import { AvailableModelsDialog } from '@/components/available-models-dialog'
+import { PrivacyToggle } from '@/components/privacy-toggle'
+import { setPrivacyMask, usePrivacyMask } from '@/lib/privacy'
 
 /**
  * 顶栏工具区：三个调度开关 + 三个动作按钮。
@@ -240,6 +244,7 @@ function FullTools({
           <span className="hidden md:inline">{t.label}</span>
         </Button>
       ))}
+      <PrivacyToggle />
       <Button variant="ghost" size="icon" onClick={onOpenModels} title="可用模型">
         <Boxes className="h-4 w-4" />
       </Button>
@@ -271,6 +276,7 @@ function CompactTools({
   onOpenModels,
   onOpenImageUpdate,
 }: ToolsProps & { hasUpdate: boolean }) {
+  const privacyMasked = usePrivacyMask()
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -295,6 +301,10 @@ function CompactTools({
         <DropdownMenuItem onSelect={onRefresh}>
           <RefreshCw />
           刷新数据
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setPrivacyMask(!privacyMasked)}>
+          {privacyMasked ? <Eye /> : <EyeOff />}
+          {privacyMasked ? '显示明文邮箱' : '打码账号邮箱'}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onOpenModels}>
           <Boxes />

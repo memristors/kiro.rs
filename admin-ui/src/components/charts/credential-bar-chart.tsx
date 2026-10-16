@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import type { CredentialDistribution } from '@/types/api'
 import { tooltipContentStyle, tooltipCursorStyle, tooltipItemStyle, tooltipLabelStyle } from './tooltip-style'
 import { formatNumber } from '@/lib/utils'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 interface Props {
   data: CredentialDistribution[]
@@ -18,7 +19,9 @@ interface ChartDatum {
 }
 
 function CredentialBarChartImpl({ data }: Props) {
-  const formatted = useMemo(() => buildChartData(data), [data])
+  const masked = usePrivacyMask()
+  // masked 参与依赖：开关变化时要重算标签
+  const formatted = useMemo(() => buildChartData(data), [data, masked])
 
   if (data.length === 0) {
     return <EmptyCredentialChart />
@@ -29,13 +32,14 @@ function CredentialBarChartImpl({ data }: Props) {
 
 function buildChartData(data: CredentialDistribution[]): ChartDatum[] {
   return data.slice(0, 12).map((d) => {
-    const fullLabel = d.email ?? `#${d.credentialId}`
+    const email = d.email ? displayEmail(d.email) : undefined
+    const fullLabel = email ?? `#${d.credentialId}`
     return {
       calls: d.calls,
       errors: d.errors,
       fullLabel,
       inputTokens: d.inputTokens,
-      label: d.email ? truncateEmail(d.email) : fullLabel,
+      label: email ? truncateEmail(email) : fullLabel,
       outputTokens: d.outputTokens,
     }
   })

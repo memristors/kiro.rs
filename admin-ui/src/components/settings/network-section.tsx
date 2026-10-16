@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { Radar } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -10,6 +11,8 @@ import {
 import { useGlobalProxy, useSetGlobalProxy } from '@/hooks/use-credentials'
 import { maskProxyUrl } from '@/lib/utils'
 import { reportSaveError } from '@/components/settings/report-error'
+import { ProxyDiagnoseDialog } from '@/components/proxy-diagnose-dialog'
+import type { DiagnoseTarget } from '@/api/ops'
 
 /**
  * 网络分区：全局出站代理。
@@ -40,6 +43,7 @@ export function NetworkSection() {
   const [draftUrl, setDraftUrl] = useState('')
   const [draftUsername, setDraftUsername] = useState('')
   const [draftPassword, setDraftPassword] = useState('')
+  const [diagnoseOpen, setDiagnoseOpen] = useState(false)
 
   useEffect(() => {
     setDraftUrl(currentUrl ?? '')
@@ -79,11 +83,23 @@ export function NetworkSection() {
     saver.save('proxy', { proxyUrl: null })
   }
 
+  // 草稿与已保存的地址不同，就测草稿（保存前先验证能不能用）；否则测当前生效的全局代理
+  const draftTrimmed = draftUrl.trim()
+  const testingDraft = draftTrimmed !== '' && draftTrimmed !== (currentUrl ?? '')
+  const diagnoseTarget: DiagnoseTarget = testingDraft
+    ? {
+        proxyUrl: draftTrimmed,
+        proxyUsername: draftUsername.trim() || undefined,
+        proxyPassword: draftPassword || undefined,
+      }
+    : {}
+
   const hint = currentUrl
     ? `当前生效：${maskProxyUrl(currentUrl)}${currentUsername ? ` (${currentUsername})` : ''}`
     : '未配置，直连上游。支持 HTTP / HTTPS / SOCKS，可填写认证凭据'
 
   return (
+    <>
     <SettingGroup
       title="全局出站代理"
       description="所有上游请求默认走这个代理；未绑定专属代理的凭据都受它影响"
@@ -114,6 +130,22 @@ export function NetworkSection() {
             disabled={isLoading || isPending || !draftUrl.trim()}
           >
             应用
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setDiagnoseOpen(true)}
+            disabled={isLoading}
+            title={
+              testingDraft
+                ? '测试输入框里还没保存的代理地址'
+                : currentUrl
+                  ? '测试当前全局代理的出口 IP 和连通性'
+                  : '未配置代理，测试服务器直连的出口'
+            }
+          >
+            <Radar className="h-3.5 w-3.5" />
+            诊断出口
           </Button>
           {currentUrl && (
             <Button
@@ -191,5 +223,12 @@ export function NetworkSection() {
         </>
       )}
     </SettingGroup>
+    <ProxyDiagnoseDialog
+      open={diagnoseOpen}
+      onOpenChange={setDiagnoseOpen}
+      target={diagnoseTarget}
+      subject={testingDraft ? '未保存的地址' : currentUrl ? '全局代理' : '直连'}
+    />
+    </>
   )
 }
