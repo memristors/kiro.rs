@@ -1075,6 +1075,8 @@ mod tests {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         }
     }
 
@@ -1439,6 +1441,8 @@ mod tests {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         };
         store.insert(&sample(TraceSample {
             trace_id: "t1",
