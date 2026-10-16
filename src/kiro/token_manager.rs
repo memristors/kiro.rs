@@ -8362,4 +8362,290 @@ mod tests {
         // 但 g2 仍可用
         assert!(manager.acquire_context(None, Some("g2")).await.is_ok());
     }
+
+    // ===== 渐进冷却 / 排队等待 / 单账号并发上限 =====
+
+    fn queue_manager(count: u64, tweak: impl FnOnce(&mut Config)) -> Arc<MultiTokenManager> {
+        let mut config = Config::default();
+        tweak(&mut config);
+        let creds = (1..=count)
+            .map(|id| {
+                let mut cred = api_key_cred(&format!("ksk_queue_test_{id}_xxxxxxxxxxxx"));
+                cred.id = Some(id);
+                cred
+            })
+            .collect();
+        Arc::new(MultiTokenManager::new(config, creds, None, None, true).unwrap())
+    }
+
+    fn cool_for(manager: &MultiTokenManager, id: u64, duration: StdDuration) {
+        let mut entries = manager.entries.lock();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.throttled_until = Some(Instant::now() + duration);
+    }
+
+    fn expire_cooldown(manager: &MultiTokenManager, id: u64) {
+        let mut entries = manager.entries.lock();
+        let entry = entries.iter_mut().find(|e| e.id == id).unwrap();
+        entry.throttled_until = None;
+    }
+
+    fn streak_of(manager: &MultiTokenManager, id: u64) -> u32 {
+        manager
+            .entries
+            .lock()
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap()
+            .throttle_streak
+    }
+
+    #[test]
+    fn adaptive_cooldown_escalates_and_a_success_resets_it() {
+        let mgr = queue_manager(1, |c| {
+            c.account_throttle_cooldown_secs = 300;
+            c.account_throttle_cooldown_base_secs = 20;
+        });
+        let (remaining, first) = mgr.report_account_throttled_adaptive(1, None, None, None);
+        assert_eq!((remaining, first), (0, 20));
+
+        // 同一时刻其它在途请求也收到 429：只记一次，不重复加码
+        let (_, again) = mgr.report_account_throttled_adaptive(1, None, None, None);
+        assert!(again <= 20, "已在冷却中，不应延长: {again}");
+        assert_eq!(streak_of(&mgr, 1), 1);
+
+        expire_cooldown(&mgr, 1);
+        assert_eq!(mgr.report_account_throttled_adaptive(1, None, None, None).1, 40);
+        expire_cooldown(&mgr, 1);
+        assert_eq!(mgr.report_account_throttled_adaptive(1, None, None, None).1, 80);
+
+        // 冷却结束后的一次成功清零连续次数
+        expire_cooldown(&mgr, 1);
+        mgr.report_success_for_request(1, None);
+        assert_eq!(streak_of(&mgr, 1), 0);
+        assert_eq!(mgr.report_account_throttled_adaptive(1, None, None, None).1, 20);
+    }
+
+    #[test]
+    fn adaptive_cooldown_prefers_upstream_retry_after_and_respects_the_cap() {
+        let mgr = queue_manager(1, |c| {
+            c.account_throttle_cooldown_secs = 100;
+            c.account_throttle_cooldown_base_secs = 20;
+        });
+        assert_eq!(mgr.report_account_throttled_adaptive(1, Some(7), None, None).1, 7);
+        expire_cooldown(&mgr, 1);
+        assert_eq!(mgr.report_account_throttled_adaptive(1, Some(9999), None, None).1, 100);
+        // 连续翻倍同样不超过上限
+        for expected in [80u64, 100, 100] {
+            expire_cooldown(&mgr, 1);
+            let applied = mgr.report_account_throttled_adaptive(1, None, None, None).1;
+            assert!(applied <= expected, "{applied} 不应超过 {expected}");
+        }
+    }
+
+    #[test]
+    fn clearing_a_throttle_resets_the_streak_and_a_straggler_success_does_not() {
+        let mgr = queue_manager(1, |_| {});
+        mgr.report_account_throttled_adaptive(1, None, None, None);
+        // 冷却期内到达的成功来自限流之前就发出的请求，不能清零连续次数
+        mgr.report_success_for_request(1, None);
+        assert_eq!(streak_of(&mgr, 1), 1);
+
+        mgr.report_account_throttled_adaptive(1, None, None, None);
+        mgr.clear_throttle(1).unwrap();
+        assert_eq!(streak_of(&mgr, 1), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_request_waits_for_the_cooldown_instead_of_failing() {
+        let mgr = queue_manager(1, |c| {
+            c.queue_enabled = true;
+            c.queue_max_wait_secs = 5;
+        });
+        cool_for(&mgr, 1, StdDuration::from_millis(400));
+
+        let started = Instant::now();
+        let ctx = mgr.acquire_context(None, None).await.expect("应在冷却结束后拿到账号");
+        let waited = started.elapsed();
+        assert_eq!(ctx.id, 1);
+        assert!(waited >= StdDuration::from_millis(300), "应该等到冷却结束: {waited:?}");
+        assert!(waited < StdDuration::from_secs(3), "不应等太久: {waited:?}");
+        assert_eq!(mgr.gate().waiting(), 0, "拿到账号后应退出队列");
+    }
+
+    #[tokio::test]
+    async fn queue_gives_up_with_retry_after_when_recovery_is_beyond_the_budget() {
+        let mgr = queue_manager(1, |c| {
+            c.queue_enabled = true;
+            c.queue_max_wait_secs = 2;
+        });
+        cool_for(&mgr, 1, StdDuration::from_secs(120));
+
+        let started = Instant::now();
+        let error = match mgr.acquire_context(None, None).await {
+            Ok(_) => panic!("冷却 120 秒远超排队预算，不应拿到账号"),
+            Err(error) => error,
+        };
+        assert!(started.elapsed() < StdDuration::from_secs(1), "等不起就应立刻拒绝，而不是白等");
+        let rate_limit = error
+            .downcast_ref::<UpstreamRateLimitError>()
+            .expect("应返回类型化限流错误（HTTP 429）");
+        let retry_after: u64 = rate_limit.retry_after().unwrap().parse().unwrap();
+        assert!((118..=121).contains(&retry_after), "Retry-After 应接近剩余冷却: {retry_after}");
+    }
+
+    #[tokio::test]
+    async fn disabled_queue_rejects_immediately_with_retry_after() {
+        let mgr = queue_manager(1, |c| c.queue_enabled = false);
+        cool_for(&mgr, 1, StdDuration::from_secs(5));
+
+        let started = Instant::now();
+        let error = match mgr.acquire_context(None, None).await {
+            Ok(_) => panic!("关闭排队时不应等待"),
+            Err(error) => error,
+        };
+        assert!(started.elapsed() < StdDuration::from_millis(500));
+        assert!(error.downcast_ref::<UpstreamRateLimitError>().is_some());
+    }
+
+    #[tokio::test]
+    async fn all_disabled_credentials_keep_the_old_error_instead_of_queueing() {
+        let mgr = queue_manager(1, |_| {});
+        mgr.set_disabled(1, true).unwrap();
+        let error = match mgr.acquire_context(None, None).await {
+            Ok(_) => panic!("全部禁用时不应拿到账号"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<UpstreamRateLimitError>().is_none());
+        assert!(error.to_string().contains("所有凭据均已禁用"));
+    }
+
+    #[tokio::test]
+    async fn concurrency_cap_queues_extra_requests_until_a_slot_frees_up() {
+        let mgr = queue_manager(1, |c| {
+            c.account_max_concurrency = 1;
+            c.queue_max_wait_secs = 10;
+        });
+        let first = mgr.acquire_context(None, None).await.unwrap();
+        assert_eq!(mgr.gate().in_flight(1), 1);
+
+        let second = {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move { mgr.acquire_context(None, None).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        assert!(!second.is_finished(), "名额被占满时第二个请求应排队等待");
+        assert_eq!(mgr.gate().waiting(), 1);
+
+        drop(first);
+        let ctx = tokio::time::timeout(StdDuration::from_secs(3), second)
+            .await
+            .expect("名额释放后应很快拿到账号")
+            .unwrap()
+            .expect("应拿到账号");
+        assert_eq!(ctx.id, 1);
+        assert_eq!(mgr.gate().in_flight(1), 1);
+        drop(ctx);
+        assert_eq!(mgr.gate().in_flight(1), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_concurrency_cap_means_unlimited() {
+        let mgr = queue_manager(1, |c| c.account_max_concurrency = 0);
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(mgr.acquire_context(None, None).await.unwrap());
+        }
+        assert_eq!(mgr.gate().in_flight(1), 8);
+        drop(held);
+        assert_eq!(mgr.gate().in_flight(1), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_queue_turns_away_newcomers_when_full() {
+        let mgr = queue_manager(1, |c| {
+            c.queue_enabled = true;
+            c.queue_max_waiters = 1;
+            c.queue_max_wait_secs = 10;
+        });
+        cool_for(&mgr, 1, StdDuration::from_millis(1500));
+
+        let first = {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move { mgr.acquire_context(None, None).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert_eq!(mgr.gate().waiting(), 1);
+
+        let started = Instant::now();
+        let error = match mgr.acquire_context(None, None).await {
+            Ok(_) => panic!("队列已满，新请求不应进入等待"),
+            Err(error) => error,
+        };
+        assert!(started.elapsed() < StdDuration::from_millis(500), "队列满时应直接拒绝");
+        assert!(error.downcast_ref::<UpstreamRateLimitError>().is_some());
+
+        // 已经在排队的那个仍然会等到账号恢复
+        let ctx = first.await.unwrap().expect("排队的请求最终应拿到账号");
+        assert_eq!(ctx.id, 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_waiting_request_frees_its_queue_position() {
+        let mgr = queue_manager(1, |c| {
+            c.queue_enabled = true;
+            c.queue_max_wait_secs = 30;
+        });
+        cool_for(&mgr, 1, StdDuration::from_secs(20));
+
+        let waiting = {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move { mgr.acquire_context(None, None).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert_eq!(mgr.gate().waiting(), 1);
+        // 客户端断开 = 请求的 future 被丢弃
+        waiting.abort();
+        let _ = waiting.await;
+        assert_eq!(mgr.gate().waiting(), 0, "断开后不应继续占着队列位置");
+    }
+
+    #[tokio::test]
+    async fn read_only_discovery_takes_no_slot_and_never_queues() {
+        let mgr = queue_manager(1, |c| c.account_max_concurrency = 1);
+        let (ctx, _, _) = mgr.acquire_context_impl(None, None, None, false).await.unwrap();
+        assert!(ctx.slot.is_none());
+        assert_eq!(mgr.gate().in_flight(1), 0);
+
+        cool_for(&mgr, 1, StdDuration::from_secs(60));
+        let started = Instant::now();
+        assert!(mgr.acquire_context_impl(None, None, None, false).await.is_err());
+        assert!(started.elapsed() < StdDuration::from_millis(500), "Admin 只读查询不应排队");
+    }
+
+    #[test]
+    fn queue_settings_validate_and_persist_in_memory() {
+        let mgr = queue_manager(1, |c| c.account_throttle_cooldown_secs = 300);
+        let ok = queue::QueueSettings {
+            cooldown_base_secs: 30,
+            queue_enabled: true,
+            queue_max_wait_secs: 45,
+            queue_max_waiters: 10,
+            account_max_concurrency: 3,
+        };
+        mgr.set_queue_settings(ok).unwrap();
+        assert_eq!(mgr.queue_settings(), ok);
+
+        let mut bad = ok;
+        bad.cooldown_base_secs = 301;
+        assert!(mgr.set_queue_settings(bad).is_err(), "首次冷却不能超过冷却上限");
+        bad = ok;
+        bad.queue_max_wait_secs = 0;
+        assert!(mgr.set_queue_settings(bad).is_err());
+        bad = ok;
+        bad.account_max_concurrency = 101;
+        assert!(mgr.set_queue_settings(bad).is_err());
+        // 校验失败不会改动已生效的配置
+        assert_eq!(mgr.queue_settings(), ok);
+    }
 }
