@@ -1678,6 +1678,7 @@ pub async fn list_traces(
                 "totalTokens": r.input_tokens + r.output_tokens + r.cache_creation_tokens + r.cache_read_tokens,
                 "credits": r.credits,
                 "firstTokenMs": r.first_token_ms,
+                "queueMs": r.queue_ms,
                 "sessionId": r.session_id,
                 "stickyOutcome": r.sticky_outcome,
                 "previousCredentialId": r.previous_credential_id,
