@@ -1,10 +1,13 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   diagnoseProxy,
+  getAutoProxy,
   getBackups,
   getCreditHistory,
   runBackup,
+  setAutoProxy,
   type DiagnoseTarget,
+  type SetAutoProxyRequest,
 } from '@/api/ops'
 
 export function useCreditHistory(credentialId: number | null, days: number, enabled = true) {
@@ -35,6 +38,23 @@ export function useRunBackup() {
     onSuccess: (result) => {
       queryClient.setQueryData(['backups'], result.status)
     },
+  })
+}
+
+export function useAutoProxy() {
+  return useQuery({
+    queryKey: ['auto-proxy'],
+    queryFn: getAutoProxy,
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
+export function useSetAutoProxy() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: SetAutoProxyRequest) => setAutoProxy(body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['auto-proxy'] }),
   })
 }
 

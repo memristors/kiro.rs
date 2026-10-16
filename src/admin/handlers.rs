@@ -2083,3 +2083,21 @@ pub async fn diagnose_proxy(
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
+
+/// GET /api/admin/config/auto-proxy
+/// 新凭据自动代理规则（不回显密码）
+pub async fn get_auto_proxy(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_auto_proxy())
+}
+
+/// PUT /api/admin/config/auto-proxy
+/// 设置新凭据自动代理规则：只影响之后新增的凭据，立即生效并写入 config.json
+pub async fn set_auto_proxy(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::types::SetAutoProxyRequest>,
+) -> impl IntoResponse {
+    match state.service.set_auto_proxy(payload) {
+        Ok(()) => Json(SuccessResponse::new("新凭据自动代理已更新")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}

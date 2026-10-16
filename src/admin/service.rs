@@ -3164,6 +3164,83 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InvalidCredential(format!("{:#}", e)))
     }
 
+    /// 新凭据自动代理配置（不回显密码）
+    pub fn get_auto_proxy(&self) -> super::types::AutoProxyResponse {
+        let cfg = self.token_manager.auto_proxy();
+        super::types::AutoProxyResponse {
+            enabled: cfg.enabled,
+            proxy_url: cfg.proxy_url,
+            username_template: cfg.username_template,
+            password_set: cfg.password.is_some(),
+        }
+    }
+
+    /// 设置新凭据自动代理并持久化到 config.json；只影响之后新增的凭据
+    pub fn set_auto_proxy(
+        &self,
+        req: super::types::SetAutoProxyRequest,
+    ) -> Result<(), AdminServiceError> {
+        let url = req
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string);
+        if let Some(u) = &url {
+            let lower = u.to_ascii_lowercase();
+            let valid = [
+                "http://",
+                "https://",
+                "socks4://",
+                "socks4a://",
+                "socks5://",
+                "socks5h://",
+            ]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme));
+            if !valid {
+                return Err(AdminServiceError::InvalidCredential(
+                    "代理 URL 格式无效，需以 http://、https://、socks4://、socks4a://、socks5:// 或 socks5h:// 开头"
+                        .to_string(),
+                ));
+            }
+        }
+        if req.enabled && url.is_none() {
+            return Err(AdminServiceError::InvalidCredential(
+                "开启自动代理需要填写代理地址".to_string(),
+            ));
+        }
+        let template = req
+            .username_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        let password = match req.password {
+            None => self.token_manager.auto_proxy().password,
+            Some(value) => Some(value).filter(|p| !p.is_empty()),
+        };
+
+        let enabled = req.enabled;
+        let new_cfg = crate::model::auto_proxy::AutoProxyConfig {
+            enabled,
+            proxy_url: url.clone(),
+            username_template: template.clone(),
+            password: password.clone(),
+        };
+        // 先持久化，成功后才切换运行时规则，避免半更新
+        self.token_manager
+            .update_config_file(move |c| {
+                c.auto_proxy_enabled = enabled;
+                c.auto_proxy_url = url;
+                c.auto_proxy_username_template = template;
+                c.auto_proxy_password = password;
+            })
+            .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
+        self.token_manager.set_auto_proxy(new_cfg);
+        Ok(())
+    }
+
     /// 触发全部代理的健康检查
     pub async fn check_all_proxies(&self) -> ProxyCheckAllResponse {
         let summary = self.proxy_pool.check_all().await;

@@ -12,6 +12,7 @@ import { useGlobalProxy, useSetGlobalProxy } from '@/hooks/use-credentials'
 import { maskProxyUrl } from '@/lib/utils'
 import { reportSaveError } from '@/components/settings/report-error'
 import { ProxyDiagnoseDialog } from '@/components/proxy-diagnose-dialog'
+import { AutoProxyGroup } from '@/components/settings/auto-proxy-group'
 import type { DiagnoseTarget } from '@/api/ops'
 
 /**
@@ -223,6 +224,9 @@ export function NetworkSection() {
         </>
       )}
     </SettingGroup>
+    <div className="mt-8">
+      <AutoProxyGroup />
+    </div>
     <ProxyDiagnoseDialog
       open={diagnoseOpen}
       onOpenChange={setDiagnoseOpen}

@@ -844,6 +844,32 @@ pub struct GlobalProxyResponse {
     pub proxy_password_set: bool,
 }
 
+/// 新凭据自动代理配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoProxyResponse {
+    pub enabled: bool,
+    pub proxy_url: Option<String>,
+    /// 用户名模板，`{id}` 会被替换成新凭据的 ID
+    pub username_template: Option<String>,
+    /// 是否已配置密码；不回显密码本身
+    pub password_set: bool,
+}
+
+/// 设置新凭据自动代理请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAutoProxyRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub username_template: Option<String>,
+    /// 省略或 null 表示保留现有密码，空字符串表示清除
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 /// 设置全局代理请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
