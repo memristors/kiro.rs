@@ -15,7 +15,7 @@ use super::{
         complete_social_relogin, create_client_key, create_group, delete_client_key,
         delete_credential, delete_group, delete_proxy, disable_quota_exceeded, enable_overage_all,
         export_credentials, force_refresh_token, get_account_rpm_limit_config,
-        get_account_throttle_config, get_all_credentials, get_backups, run_backup,
+        get_account_throttle_config, get_all_credentials, get_backups, run_backup, stats_credit_history,
         get_credential_balance, get_credential_metadata_schema, get_credential_models,
         get_current_models, get_global_proxy, get_custom_models,
         get_cache_metering_config, get_session_affinity_config,
@@ -219,6 +219,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/by-model", get(stats_by_model))
         .route("/stats/by-credential", get(stats_by_credential))
         .route("/stats/by-key", get(stats_by_key))
+        .route("/stats/credit-history", get(stats_credit_history))
         .route("/traces/failure-stats", get(trace_failure_stats))
         .route("/traces", get(list_traces))
         .route("/backups", get(get_backups))

@@ -354,6 +354,15 @@ pub struct Config {
     #[serde(default = "default_credential_backup_keep")]
     pub credential_backup_keep: u32,
 
+    /// 是否记录凭据额度历史（默认开启）。写入 traces.db 的 credit_history 表，
+    /// 只在额度变化时落点，用于 Admin 里的额度趋势图和 CSV 导出。
+    #[serde(default = "default_credit_history_enabled")]
+    pub credit_history_enabled: bool,
+
+    /// 额度历史保留天数（默认 90）。后台任务每天清理超期记录。
+    #[serde(default = "default_credit_history_retention_days")]
+    pub credit_history_retention_days: u32,
+
     /// 端点特定的配置
     ///
     /// 键为端点名（如 "ide" / "cli"），值为该端点自由定义的参数对象。
@@ -500,6 +509,14 @@ fn default_usage_log_retention_days() -> u32 {
     31
 }
 
+fn default_credit_history_enabled() -> bool {
+    true
+}
+
+fn default_credit_history_retention_days() -> u32 {
+    90
+}
+
 fn default_credential_backup_enabled() -> bool {
     true
 }
@@ -566,6 +583,8 @@ impl Default for Config {
             trace_enabled: default_trace_enabled(),
             trace_retention_days: default_trace_retention_days(),
             usage_log_retention_days: default_usage_log_retention_days(),
+            credit_history_enabled: default_credit_history_enabled(),
+            credit_history_retention_days: default_credit_history_retention_days(),
             credential_backup_enabled: default_credential_backup_enabled(),
             credential_backup_interval_minutes: default_credential_backup_interval_minutes(),
             credential_backup_keep: default_credential_backup_keep(),

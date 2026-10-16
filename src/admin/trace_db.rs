@@ -269,6 +269,32 @@ pub struct TraceStore {
     enabled: AtomicBool,
     /// 记录保留天数（运行时可改），cleanup 时读取。
     retention_days: AtomicU64,
+    /// 是否记录凭据额度历史（credit_history 表）。独立于 trace 开关。
+    credit_enabled: AtomicBool,
+    /// 额度历史保留天数。
+    credit_retention_days: AtomicU64,
+}
+
+/// 额度历史默认保留天数
+pub const DEFAULT_CREDIT_RETENTION_DAYS: u32 = 90;
+/// 额度没有变化时，每隔多久补记一个点，让趋势图上线条保持连续
+const CREDIT_HEARTBEAT_SECS: i64 = 6 * 3600;
+/// 额度变化小于这个值视为没变（接口返回的浮点尾差）
+const CREDIT_EPSILON: f64 = 1e-6;
+
+/// 凭据额度快照（credit_history 表的一行）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditPoint {
+    pub credential_id: u64,
+    /// Unix 秒
+    pub ts_epoch: i64,
+    /// 已用额度
+    pub used: f64,
+    /// 总额度
+    pub limit: f64,
+    /// 相对该凭据上一个点的变化；首个点为 0，额度重置时为负
+    pub delta: f64,
 }
 
 impl TraceStore {
@@ -296,6 +322,8 @@ impl TraceStore {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(enabled),
             retention_days: AtomicU64::new(retention_days.max(1) as u64),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         })
     }
 
@@ -308,6 +336,8 @@ impl TraceStore {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         })
     }
 
@@ -685,6 +715,13 @@ impl TraceStore {
                 [cutoff],
             )?;
             let n = tx.execute("DELETE FROM traces WHERE ts_epoch < ?1", [cutoff])?;
+            let credit_cutoff = (Utc::now()
+                - chrono::Duration::days(self.credit_history_retention_days() as i64))
+            .timestamp();
+            tx.execute(
+                "DELETE FROM credit_history WHERE ts_epoch < ?1",
+                [credit_cutoff],
+            )?;
             Ok(n)
         })();
         match res {
@@ -721,6 +758,10 @@ impl TraceStore {
             )?;
             let n = tx.execute(
                 "DELETE FROM traces WHERE final_credential_id = ?1",
+                [credential_id],
+            )?;
+            tx.execute(
+                "DELETE FROM credit_history WHERE credential_id = ?1",
                 [credential_id],
             )?;
             Ok(n)
@@ -782,6 +823,110 @@ impl TraceStore {
     }
 }
 
+// ============ 凭据额度历史 ============
+
+impl TraceStore {
+    /// 设置额度历史的开关与保留天数（启动时按配置调用一次）
+    pub fn configure_credit_history(&self, enabled: bool, retention_days: u32) {
+        self.credit_enabled.store(enabled, Ordering::Relaxed);
+        self.credit_retention_days
+            .store(retention_days.max(1) as u64, Ordering::Relaxed);
+    }
+
+    pub fn credit_history_retention_days(&self) -> u64 {
+        self.credit_retention_days.load(Ordering::Relaxed)
+    }
+
+    /// 记录一次额度快照。
+    ///
+    /// 与该凭据上一个点相比额度或总额度有变化才写入；没变化时每 6 小时补记一个点，
+    /// 避免一个闲置账号的趋势线断掉。返回是否写入了新记录。
+    pub fn record_credit_point(&self, credential_id: u64, used: f64, limit: f64) -> bool {
+        self.record_credit_point_at(credential_id, used, limit, Utc::now().timestamp())
+    }
+
+    fn record_credit_point_at(&self, credential_id: u64, used: f64, limit: f64, now: i64) -> bool {
+        if !self.credit_enabled.load(Ordering::Relaxed)
+            || credential_id == 0
+            || !used.is_finite()
+            || !limit.is_finite()
+        {
+            return false;
+        }
+        let conn = self.conn.lock();
+        let last: Option<(i64, f64, f64)> = conn
+            .query_row(
+                "SELECT ts_epoch, used, usage_limit FROM credit_history \
+                 WHERE credential_id = ?1 ORDER BY ts_epoch DESC, id DESC LIMIT 1",
+                [credential_id as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+        let delta = match last {
+            Some((last_ts, last_used, last_limit)) => {
+                let changed = (used - last_used).abs() > CREDIT_EPSILON
+                    || (limit - last_limit).abs() > CREDIT_EPSILON;
+                if !changed && now - last_ts < CREDIT_HEARTBEAT_SECS {
+                    return false;
+                }
+                used - last_used
+            }
+            None => 0.0,
+        };
+        match conn.execute(
+            "INSERT INTO credit_history (credential_id, ts_epoch, used, usage_limit, delta) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![credential_id as i64, now, used, limit, delta],
+        ) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("写入额度历史失败（凭据 #{}）: {}", credential_id, e);
+                false
+            }
+        }
+    }
+
+    /// 查询额度历史，按时间升序。`credential_id` 为 None 时返回全部凭据。
+    pub fn credit_history(
+        &self,
+        credential_id: Option<u64>,
+        since_epoch: i64,
+        max_rows: usize,
+    ) -> Vec<CreditPoint> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT credential_id, ts_epoch, used, usage_limit, delta FROM credit_history \
+             WHERE ts_epoch >= ?1 AND (?2 IS NULL OR credential_id = ?2) \
+             ORDER BY ts_epoch ASC, id ASC LIMIT ?3",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("额度历史查询准备失败: {}", e);
+                return Vec::new();
+            }
+        };
+        let rows = stmt.query_map(
+            rusqlite::params![since_epoch, credential_id.map(|id| id as i64), max_rows as i64],
+            |row| {
+                Ok(CreditPoint {
+                    credential_id: row.get::<_, i64>(0)? as u64,
+                    ts_epoch: row.get(1)?,
+                    used: row.get(2)?,
+                    limit: row.get(3)?,
+                    delta: row.get(4)?,
+                })
+            },
+        );
+        match rows {
+            Ok(rows) => rows.flatten().collect(),
+            Err(e) => {
+                tracing::warn!("额度历史查询失败: {}", e);
+                Vec::new()
+            }
+        }
+    }
+}
+
 /// 按凭据的失败分类计数（鉴权 / 账号风控 / 其他）
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -838,6 +983,17 @@ CREATE TABLE IF NOT EXISTS trace_attempts (
     PRIMARY KEY (trace_id, attempt)
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_trace ON trace_attempts(trace_id);
+
+CREATE TABLE IF NOT EXISTS credit_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL,
+    ts_epoch      INTEGER NOT NULL,
+    used          REAL NOT NULL,
+    usage_limit   REAL NOT NULL,
+    delta         REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_credit_cred_ts ON credit_history(credential_id, ts_epoch);
+CREATE INDEX IF NOT EXISTS idx_credit_ts ON credit_history(ts_epoch);
 ";
 
 #[cfg(test)]
@@ -919,6 +1075,8 @@ mod tests {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         }
     }
 
@@ -1283,6 +1441,8 @@ mod tests {
             conn: Mutex::new(conn),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
+            credit_enabled: AtomicBool::new(true),
+            credit_retention_days: AtomicU64::new(DEFAULT_CREDIT_RETENTION_DAYS as u64),
         };
         store.insert(&sample(TraceSample {
             trace_id: "t1",
@@ -1421,5 +1581,67 @@ mod tests {
         // LIKE 元字符被转义：% 不再是通配符，不应匹配任何记录
         assert!(ids("%").is_empty(), "% 应按字面量处理");
         assert!(ids("_").is_empty(), "_ 应按字面量处理");
+    }
+
+    #[test]
+    fn credit_history_records_changes_and_heartbeats() {
+        let store = TraceStore::open_in_memory().unwrap();
+        let t0 = 1_000_000;
+        assert!(store.record_credit_point_at(7, 10.0, 100.0, t0));
+        assert!(
+            !store.record_credit_point_at(7, 10.0, 100.0, t0 + 60),
+            "heartbeat 窗口内无变化应跳过"
+        );
+        assert!(store.record_credit_point_at(7, 12.5, 100.0, t0 + 120));
+        assert!(store.record_credit_point_at(
+            7,
+            12.5,
+            100.0,
+            t0 + 120 + CREDIT_HEARTBEAT_SECS
+        ));
+        assert!(store.record_credit_point_at(7, 0.0, 100.0, t0 + 200_000));
+
+        let points = store.credit_history(Some(7), 0, 100);
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[0].delta, 0.0);
+        assert!((points[1].delta - 2.5).abs() < 1e-9);
+        assert_eq!(points[2].delta, 0.0);
+        assert!(points[3].delta < 0.0, "额度重置时 delta 为负");
+    }
+
+    #[test]
+    fn credit_history_filters_and_respects_switch() {
+        let store = TraceStore::open_in_memory().unwrap();
+        store.record_credit_point_at(1, 1.0, 10.0, 100);
+        store.record_credit_point_at(2, 2.0, 10.0, 200);
+        assert_eq!(store.credit_history(None, 0, 10).len(), 2);
+        assert_eq!(store.credit_history(Some(2), 0, 10).len(), 1);
+        assert_eq!(store.credit_history(None, 150, 10).len(), 1);
+        assert_eq!(store.credit_history(None, 0, 1).len(), 1);
+
+        store.configure_credit_history(false, 30);
+        assert!(!store.record_credit_point_at(3, 1.0, 10.0, 300));
+        assert_eq!(store.credit_history_retention_days(), 30);
+    }
+
+    #[test]
+    fn credit_history_removed_with_credential() {
+        let store = TraceStore::open_in_memory().unwrap();
+        store.record_credit_point(5, 1.0, 10.0);
+        store.record_credit_point(6, 1.0, 10.0);
+        store.delete_for_credential(5);
+        let points = store.credit_history(None, 0, 10);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].credential_id, 6);
+    }
+
+    #[test]
+    fn cleanup_drops_expired_credit_history() {
+        let store = TraceStore::open_in_memory().unwrap();
+        let now = Utc::now().timestamp();
+        store.record_credit_point_at(1, 1.0, 10.0, now - 200 * 86400);
+        store.record_credit_point_at(1, 2.0, 10.0, now - 86400);
+        store.cleanup();
+        assert_eq!(store.credit_history(None, 0, 10).len(), 1);
     }
 }

@@ -1045,6 +1045,7 @@ impl AdminService {
 
         // 缓存未命中或已过期，从上游获取
         let balance = self.fetch_balance(id).await?;
+        self.record_credit_snapshot(&balance);
 
         // 更新缓存
         {
@@ -1060,6 +1061,14 @@ impl AdminService {
         self.save_balance_cache();
 
         Ok(balance)
+    }
+
+    /// 把一次余额结果记入额度历史（traces.db 的 credit_history 表）。
+    /// 无变化时不会写入，见 `TraceStore::record_credit_point`。
+    fn record_credit_snapshot(&self, balance: &BalanceResponse) {
+        if let Some(store) = &self.trace_store {
+            store.record_credit_point(balance.id, balance.current_usage, balance.usage_limit);
+        }
     }
 
     /// 从上游获取余额（无缓存）
@@ -1283,6 +1292,7 @@ impl AdminService {
             }
             match self.fetch_balance(entry.id).await {
                 Ok(balance) => {
+                    self.record_credit_snapshot(&balance);
                     // 此路径只恢复此前因额度耗尽而被禁用的账号。即使超额开关
                     // 仍为开启，也不能证明超额额度尚未耗尽；只有订阅额度在新
                     // 计费周期恢复为正数时才重新加入调度。

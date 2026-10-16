@@ -1935,3 +1935,136 @@ pub async fn run_backup(State(state): State<AdminState>) -> Response {
             .into_response(),
     }
 }
+
+// ============ 凭据额度历史 ============
+
+/// 额度历史单次最多返回的点数
+const CREDIT_HISTORY_MAX_ROWS: usize = 50_000;
+
+/// CSV 字段转义：含逗号、引号、换行时加引号；以公式字符开头时前置单引号，防止表格软件执行
+fn csv_field(value: &str) -> String {
+    let mut text = value.to_string();
+    if matches!(text.chars().next(), Some('=' | '+' | '-' | '@')) {
+        text.insert(0, '\'');
+    }
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text
+    }
+}
+
+fn credit_time(ts_epoch: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts_epoch, 0)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_default()
+}
+
+/// GET /api/admin/stats/credit-history?credentialId=1&days=7&format=json|csv
+///
+/// 凭据额度历史。`credentialId` 省略时返回全部凭据；`days` 默认 7、范围 1-365。
+/// `format=csv` 以附件形式下载；默认 JSON，含逐点数据和按凭据汇总（烧得多快、重置了几次）。
+pub async fn stats_credit_history(
+    State(state): State<AdminState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let credential_id = match params.get("credentialId").filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(id) => Some(id),
+            Err(_) => return stats_bad_request("credentialId 必须是正整数".to_string()),
+        },
+        None => None,
+    };
+    let days = params
+        .get("days")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(7)
+        .clamp(1, 365);
+    let as_csv = match params.get("format").map(String::as_str) {
+        None | Some("") | Some("json") => false,
+        Some("csv") => true,
+        Some(_) => return stats_bad_request("format 只支持 json 或 csv".to_string()),
+    };
+
+    let since = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp();
+    let points = state
+        .trace_store
+        .credit_history(credential_id, since, CREDIT_HISTORY_MAX_ROWS);
+    let emails: HashMap<u64, String> = state
+        .service
+        .get_all_credentials()
+        .credentials
+        .into_iter()
+        .filter_map(|c| c.email.map(|email| (c.id, email)))
+        .collect();
+
+    if as_csv {
+        let mut out = String::from("credential_id,email,time,used,limit,delta\n");
+        for p in &points {
+            let email = emails.get(&p.credential_id).map(String::as_str).unwrap_or("");
+            out.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                p.credential_id,
+                csv_field(email),
+                credit_time(p.ts_epoch),
+                p.used,
+                p.limit,
+                p.delta
+            ));
+        }
+        let filename = format!(
+            "credit-history-{}.csv",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        );
+        return (
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}\"", filename),
+                ),
+            ],
+            out,
+        )
+            .into_response();
+    }
+
+    // 按凭据汇总：区间内累计消耗（只累加正向变化）、检测到的额度重置次数、日均消耗
+    let mut ids: Vec<u64> = points.iter().map(|p| p.credential_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let summary: Vec<serde_json::Value> = ids
+        .into_iter()
+        .map(|id| {
+            let own: Vec<&super::trace_db::CreditPoint> =
+                points.iter().filter(|p| p.credential_id == id).collect();
+            let first = own[0];
+            let last = own[own.len() - 1];
+            let burned: f64 = own.iter().map(|p| p.delta).filter(|d| *d > 0.0).sum();
+            let resets = own.iter().filter(|p| p.delta < 0.0).count();
+            let span_days = ((last.ts_epoch - first.ts_epoch).max(3600) as f64) / 86_400.0;
+            serde_json::json!({
+                "credentialId": id,
+                "email": emails.get(&id),
+                "points": own.len(),
+                "firstAt": credit_time(first.ts_epoch),
+                "lastAt": credit_time(last.ts_epoch),
+                "firstUsed": first.used,
+                "lastUsed": last.used,
+                "limit": last.limit,
+                "burned": burned,
+                "burnedPerDay": burned / span_days,
+                "resets": resets,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "days": days,
+        "retentionDays": state.trace_store.credit_history_retention_days(),
+        "truncated": points.len() >= CREDIT_HISTORY_MAX_ROWS,
+        "points": points,
+        "summary": summary,
+    }))
+    .into_response()
+}
