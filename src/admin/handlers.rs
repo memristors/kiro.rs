@@ -1884,3 +1884,54 @@ pub async fn delete_group(
     )))
     .into_response()
 }
+
+// ============ 凭据备份 ============
+
+fn backup_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(super::types::AdminErrorResponse::not_found("凭据备份未启用")),
+    )
+        .into_response()
+}
+
+/// GET /api/admin/backups
+/// 备份开关、间隔、保留份数、最近一次结果，以及现有备份列表（新的在前）
+pub async fn get_backups(State(state): State<AdminState>) -> Response {
+    match &state.backups {
+        Some(backups) => Json(backups.status()).into_response(),
+        None => backup_unavailable(),
+    }
+}
+
+/// POST /api/admin/backups/run
+/// 立即备份一次；凭据文件内容与最新备份相同时不会产生新文件（created 为 null）
+pub async fn run_backup(State(state): State<AdminState>) -> Response {
+    let Some(backups) = state.backups.clone() else {
+        return backup_unavailable();
+    };
+    let worker = backups.clone();
+    match tokio::task::spawn_blocking(move || worker.run_once()).await {
+        Ok(Ok(created)) => Json(serde_json::json!({
+            "created": created,
+            "status": backups.status(),
+        }))
+        .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(super::types::AdminErrorResponse::internal_error(format!(
+                "{:#}",
+                e
+            ))),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(super::types::AdminErrorResponse::internal_error(format!(
+                "备份任务异常: {}",
+                e
+            ))),
+        )
+            .into_response(),
+    }
+}

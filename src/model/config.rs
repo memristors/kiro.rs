@@ -342,6 +342,18 @@ pub struct Config {
     #[serde(default = "default_usage_log_retention_days")]
     pub usage_log_retention_days: u32,
 
+    /// 是否定时备份 credentials.json（默认开启）。备份写到凭据文件同目录的 `backups/`。
+    #[serde(default = "default_credential_backup_enabled")]
+    pub credential_backup_enabled: bool,
+
+    /// 凭据备份间隔（分钟，默认 30，最小 5）。
+    #[serde(default = "default_credential_backup_interval_minutes")]
+    pub credential_backup_interval_minutes: u32,
+
+    /// 凭据备份保留份数（默认 10，范围 1-500）。
+    #[serde(default = "default_credential_backup_keep")]
+    pub credential_backup_keep: u32,
+
     /// 端点特定的配置
     ///
     /// 键为端点名（如 "ide" / "cli"），值为该端点自由定义的参数对象。
@@ -488,6 +500,18 @@ fn default_usage_log_retention_days() -> u32 {
     31
 }
 
+fn default_credential_backup_enabled() -> bool {
+    true
+}
+
+fn default_credential_backup_interval_minutes() -> u32 {
+    30
+}
+
+fn default_credential_backup_keep() -> u32 {
+    10
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -542,6 +566,9 @@ impl Default for Config {
             trace_enabled: default_trace_enabled(),
             trace_retention_days: default_trace_retention_days(),
             usage_log_retention_days: default_usage_log_retention_days(),
+            credential_backup_enabled: default_credential_backup_enabled(),
+            credential_backup_interval_minutes: default_credential_backup_interval_minutes(),
+            credential_backup_keep: default_credential_backup_keep(),
             endpoints: HashMap::new(),
             custom_models: Vec::new(),
             credential_metadata_schema: None,

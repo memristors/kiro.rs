@@ -155,7 +155,7 @@ async fn main() {
         config.clone(),
         credentials_list,
         proxy_config.clone(),
-        Some(credentials_path.into()),
+        Some(credentials_path.clone().into()),
         is_multiple_format,
     )
     .unwrap_or_else(|e| {
@@ -252,6 +252,17 @@ async fn main() {
             }
         });
     }
+
+    // 凭据文件定时备份：复制 credentials.json 到同目录的 backups/，只保留最新若干份
+    let credential_backups: admin::backup::SharedBackupManager =
+        std::sync::Arc::new(admin::backup::BackupManager::new(
+            std::path::PathBuf::from(&credentials_path),
+            cache_dir.join("backups"),
+            config.credential_backup_enabled,
+            config.credential_backup_interval_minutes,
+            config.credential_backup_keep,
+        ));
+    credential_backups.spawn();
 
     if let Some(initial_key) = configured_api_key.as_ref() {
         client_key_manager.sync_system_key(
@@ -384,7 +395,8 @@ async fn main() {
                 usage_aggregator.clone(),
                 admin_trace_store,
                 group_manager.clone(),
-            );
+            )
+            .with_backups(credential_backups.clone());
 
             // 启动余额后台刷新调度器（每 5 分钟一次，与缓存 TTL 对齐）
             admin_state

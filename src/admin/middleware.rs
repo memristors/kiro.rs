@@ -35,6 +35,8 @@ pub struct AdminState {
     pub trace_store: SharedTraceStore,
     /// 账号分组注册表（持久化到 groups.json）
     pub groups: SharedGroupManager,
+    /// 凭据定时备份（未配置时为 None）
+    pub backups: Option<super::backup::SharedBackupManager>,
 }
 
 impl AdminState {
@@ -53,7 +55,14 @@ impl AdminState {
             usage_aggregator,
             trace_store,
             groups,
+            backups: None,
         }
+    }
+
+    /// 挂载凭据备份管理器
+    pub fn with_backups(mut self, backups: super::backup::SharedBackupManager) -> Self {
+        self.backups = Some(backups);
+        self
     }
 }
 
