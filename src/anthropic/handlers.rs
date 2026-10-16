@@ -2408,6 +2408,7 @@ mod tests {
             route: parking_lot::Mutex::new(None),
             finalized: std::sync::atomic::AtomicBool::new(false),
             upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+            live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
         };
 
         let attempt = |attempt, credential_id, outcome: &str| TraceAttempt {
@@ -2481,6 +2482,7 @@ mod tests {
             route: parking_lot::Mutex::new(None),
             finalized: std::sync::atomic::AtomicBool::new(false),
             upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+            live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
         };
 
         tracer.mark_first_token();
@@ -2515,6 +2517,7 @@ mod tests {
             route: parking_lot::Mutex::new(None),
             finalized: std::sync::atomic::AtomicBool::new(false),
             upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+            live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
         };
         let attempt = |credential_id, endpoint: &str, status, attempt_outcome: &str| TraceAttempt {
             attempt: 0,
@@ -2571,6 +2574,7 @@ mod tests {
                 route: parking_lot::Mutex::new(None),
                 finalized: std::sync::atomic::AtomicBool::new(false),
                 upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+                live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
             };
             // 不调用任何 finalize，直接离开作用域触发 Drop
         }
@@ -2614,6 +2618,7 @@ mod tests {
                 route: parking_lot::Mutex::new(None),
                 finalized: std::sync::atomic::AtomicBool::new(false),
                 upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+                live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
             };
             tracer.mark_upstream_headers_received();
             // 不调用 finalize，直接离开作用域模拟 headers 已到后 handler/body 被取消。
@@ -2654,6 +2659,7 @@ mod tests {
                 route: parking_lot::Mutex::new(None),
                 finalized: std::sync::atomic::AtomicBool::new(false),
                 upstream_headers_received: std::sync::atomic::AtomicBool::new(false),
+                live: crate::admin::live::LiveEntry::register(Uuid::new_v4().to_string(), Utc::now().to_rfc3339(), "test".to_string(), 0, false, None),
             };
             tracer.finalize("success", None, None, None, TraceUsage::zero());
             // 离开作用域触发 Drop —— 应被幂等守卫拦下

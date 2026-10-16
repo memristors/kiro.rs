@@ -47,6 +47,7 @@ import {
 } from '@/components/console/rail'
 import type { TraceAttempt, TraceQuery, TraceRecord, UsageSource } from '@/types/api'
 import { displayEmail, usePrivacyMask } from '@/lib/privacy'
+import { LiveRequestsPanel } from '@/components/live-requests-panel'
 
 /** 失败分类 → 中文标签 + Badge 颜色 */
 function outcomeStyle(outcome: string): {
@@ -498,6 +499,17 @@ function DurationCell({ rec }: { rec: TraceRecord }) {
           {formatDuration(rec.durationMs)}
         </span>
       </span>
+      {(rec.queueMs ?? 0) >= 500 && (
+        <span
+          className="cursor-default whitespace-nowrap"
+          title="没有账号立即可用时，在等待队列里排队的时间（已包含在总耗时内）"
+        >
+          <span className="text-[10px] text-muted-foreground/70">排队 </span>
+          <span className="font-mono tabular-nums text-amber-600 dark:text-amber-400">
+            {formatDuration(rec.queueMs ?? 0)}
+          </span>
+        </span>
+      )}
     </span>
   )
 }
@@ -1149,6 +1161,9 @@ export function TraceLogPage() {
           </>
         }
       />
+
+      {/* 进行中的请求：排队 / 连接上游 / 生成中 / 输出中；结束后进入下方历史 */}
+      <LiveRequestsPanel />
 
       {/* 筛选栏：时间范围在最前，因为排查的第一句话通常是"刚才那几分钟" */}
       <div className="flex flex-wrap items-center gap-2">
