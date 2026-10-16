@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { useUpdateRefreshToken, useSetDisabled, useResetFailure, useUpdateCredential } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { CredentialStatusItem } from '@/types/api'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 interface UpdateTokenDialogProps {
   open: boolean
@@ -83,6 +84,7 @@ function parseTokenInput(input: string): ParsedTokenData {
 }
 
 export function UpdateTokenDialog({ open, onOpenChange, credential }: UpdateTokenDialogProps) {
+  usePrivacyMask()
   const [input, setInput] = useState('')
   const [step, setStep] = useState<'idle' | 'updating' | 'done'>('idle')
   const [stepLog, setStepLog] = useState<string[]>([])
@@ -195,7 +197,7 @@ export function UpdateTokenDialog({ open, onOpenChange, credential }: UpdateToke
         <DialogHeader>
           <DialogTitle>重新导入凭据 #{credential.id}</DialogTitle>
           <DialogDescription>
-            为 {credential.email || `凭据 #${credential.id}`} 粘贴新 Token，
+            为 {displayEmail(credential.email) || `凭据 #${credential.id}`} 粘贴新 Token，
             系统将自动更新 Token、重置失败计数并重新启用。
           </DialogDescription>
         </DialogHeader>

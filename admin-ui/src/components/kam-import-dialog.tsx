@@ -19,6 +19,7 @@ import {
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 import { extractErrorMessage, sha256Hex, normalizeImportAuthMethod } from '@/lib/utils'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 interface KamImportDialogProps {
   open: boolean
@@ -194,6 +195,7 @@ function parseKamJson(raw: string): KamAccount[] {
 }
 
 export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
+  usePrivacyMask()
   const [jsonInput, setJsonInput] = useState('')
   const [importing, setImporting] = useState(false)
   const [skipErrorAccounts, setSkipErrorAccounts] = useState(true)
@@ -436,14 +438,14 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
                 email: ev.email,
                 credentialId: ev.credentialId,
               })
-              setCurrentProcessing(ev.email ? `验活成功: ${ev.email}` : '验活成功')
+              setCurrentProcessing(ev.email ? `验活成功: ${displayEmail(ev.email)}` : '验活成功')
             } else if (ev.status === 'imported') {
               updateResult(orig, {
                 status: 'imported',
                 email: ev.email,
                 credentialId: ev.credentialId,
               })
-              setCurrentProcessing(ev.email ? `已导入: ${ev.email}` : '已导入')
+              setCurrentProcessing(ev.email ? `已导入: ${displayEmail(ev.email)}` : '已导入')
             } else if (ev.status === 'duplicate') {
               updateResult(orig, { status: 'duplicate', error: ev.error || '该凭据已存在' })
             } else {
@@ -678,7 +680,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium">
-                            {result.email || `账号 #${result.index}`}
+                            {displayEmail(result.email) || `账号 #${result.index}`}
                           </span>
                           <span className="text-xs text-muted-foreground">
                             {getStatusText(result)}

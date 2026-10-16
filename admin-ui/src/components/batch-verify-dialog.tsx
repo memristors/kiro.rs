@@ -7,6 +7,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Trash2 } from 'lucide-react'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 export interface VerifyResult {
   id: number
@@ -42,6 +43,7 @@ export function BatchVerifyDialog({
   onDeleteFailed,
   deleting,
 }: BatchVerifyDialogProps) {
+  usePrivacyMask()
   const resultsArray = Array.from(results.values())
   const successCount = resultsArray.filter(r => r.status === 'success').length
   const failedCount = resultsArray.filter(r => r.status === 'failed').length
@@ -115,7 +117,7 @@ export function BatchVerifyDialog({
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="font-medium shrink-0">凭据 #{result.id}</span>
                       {result.email && (
-                        <span className="text-xs opacity-80 truncate">{result.email}</span>
+                        <span className="text-xs opacity-80 truncate">{displayEmail(result.email)}</span>
                       )}
                       {result.status === 'success' && result.usage && (
                         <Badge variant="secondary" className="text-xs shrink-0">

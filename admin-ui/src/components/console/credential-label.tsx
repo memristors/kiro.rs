@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 /**
  * 凭据标识：`#id` + 邮箱。
@@ -23,6 +24,7 @@ export function CredentialLabel({
   idClassName?: string
   showId?: boolean
 }) {
+  usePrivacyMask()
   return (
     <span className={cn('inline-flex min-w-0 items-baseline gap-1.5', className)}>
       {showId && (
@@ -37,7 +39,7 @@ export function CredentialLabel({
         </span>
       )}
       <span className="min-w-0 truncate">
-        {email || <span className="text-muted-foreground">未设置邮箱</span>}
+        {email ? displayEmail(email) : <span className="text-muted-foreground">未设置邮箱</span>}
       </span>
     </span>
   )

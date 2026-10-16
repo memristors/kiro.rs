@@ -1,4 +1,5 @@
 import { useCredentials } from '@/hooks/use-credentials'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 /**
  * 优先级编辑时的队列位置预览 —— 优先级这件事的签名元素。
@@ -19,7 +20,7 @@ import { useCredentials } from '@/hooks/use-credentials'
 
 /** 邻居的展示名。与凭据行一致地带上 #id，指认的是同一个东西。 */
 function label(email: string | undefined, id: number): string {
-  return email ? `#${id} ${email}` : `#${id}`
+  return email ? `#${id} ${displayEmail(email)}` : `#${id}`
 }
 
 export function PriorityPreview({
@@ -33,6 +34,7 @@ export function PriorityPreview({
   /** 该凭据当前是否已禁用 */
   disabled: boolean
 }) {
+  usePrivacyMask()
   // 读 react-query 缓存里的凭据全集（与列表同一个 queryKey，不会额外发请求）
   const { data } = useCredentials()
 

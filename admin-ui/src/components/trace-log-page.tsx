@@ -46,6 +46,7 @@ import {
   type RailTone,
 } from '@/components/console/rail'
 import type { TraceAttempt, TraceQuery, TraceRecord, UsageSource } from '@/types/api'
+import { displayEmail, usePrivacyMask } from '@/lib/privacy'
 
 /** 失败分类 → 中文标签 + Badge 颜色 */
 function outcomeStyle(outcome: string): {
@@ -240,7 +241,7 @@ function formatTokenFull(n: number): string {
 
 function credLabel(id: number, email?: string | null): string {
   if (id === 0) return '—'
-  return email ? email : `#${id}`
+  return email ? displayEmail(email) : `#${id}`
 }
 
 function keyLabel(keyId: number, keyName?: string | null): string {
@@ -1043,6 +1044,7 @@ function useTraceColumns(): ConsoleColumn<TraceRecord>[] {
 }
 
 export function TraceLogPage() {
+  usePrivacyMask()
   const [url, patchUrl, resetUrl] = useUrlState('traces', URL_DEFAULTS)
   const [searchDraft, setSearchDraft] = useState(url.q)
   const debouncedSearch = useDebounced(searchDraft)

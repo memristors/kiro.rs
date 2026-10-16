@@ -5,6 +5,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
+import { CreditHistoryChart } from '@/components/credit-history-chart'
 import { useCredentialBalance } from '@/hooks/use-credentials'
 import { parseError } from '@/lib/utils'
 
@@ -38,7 +39,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             凭据 #{credentialId} 余额信息
@@ -118,6 +119,9 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
             </div>
           </div>
         )}
+
+        {/* 历史是本地记录的，余额接口失败（被封、token 失效）时仍然有用，所以不放进 balance 分支 */}
+        {credentialId !== null && <CreditHistoryChart credentialId={credentialId} />}
       </DialogContent>
     </Dialog>
   )
