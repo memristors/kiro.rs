@@ -236,6 +236,13 @@ async fn main() {
         }
     };
 
+    if let Some(ts) = &trace_store {
+        ts.configure_credit_history(
+            config.credit_history_enabled,
+            config.credit_history_retention_days,
+        );
+    }
+
     // 启动后定期清理过期 usage_log 与 trace 记录
     {
         let recorder = usage_recorder.clone();
