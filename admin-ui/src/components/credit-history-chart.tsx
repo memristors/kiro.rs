@@ -29,7 +29,8 @@ const RANGES = [
 ] as const
 
 function money(value: number): string {
-  return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  // -0 会被格式化成 "-0.00"
+  return (value === 0 ? 0 : value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function axisTime(ts: number, days: number): string {

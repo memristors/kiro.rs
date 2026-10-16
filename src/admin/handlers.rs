@@ -2040,7 +2040,8 @@ pub async fn stats_credit_history(
                 points.iter().filter(|p| p.credential_id == id).collect();
             let first = own[0];
             let last = own[own.len() - 1];
-            let burned: f64 = own.iter().map(|p| p.delta).filter(|d| *d > 0.0).sum();
+            // 空迭代求和得到 -0.0，序列化成 "-0.0" 后前端会显示成 -$0.00；加 0.0 归一为 +0.0
+            let burned: f64 = own.iter().map(|p| p.delta).filter(|d| *d > 0.0).sum::<f64>() + 0.0;
             let resets = own.iter().filter(|p| p.delta < 0.0).count();
             let span_days = ((last.ts_epoch - first.ts_epoch).max(3600) as f64) / 86_400.0;
             serde_json::json!({
