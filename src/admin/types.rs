@@ -764,6 +764,18 @@ pub struct ProxyCheckResponse {
     pub auto_disabled: bool,
 }
 
+/// 代理网络诊断请求。按优先级取第一个给出的：
+/// `proxyId`（代理池条目）→ `credentialId`（该凭据实际生效的代理）→ `proxyUrl`（临时地址）→ 全局代理 / 直连
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyDiagnoseRequest {
+    pub proxy_id: Option<u64>,
+    pub credential_id: Option<u64>,
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+}
+
 /// 全量健康检查响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

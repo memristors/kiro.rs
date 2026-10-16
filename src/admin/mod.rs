@@ -20,6 +20,7 @@ pub mod backup;
 mod error;
 mod handlers;
 mod middleware;
+pub mod net_check;
 pub mod proxy_pool;
 mod router;
 mod service;

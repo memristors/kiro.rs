@@ -2068,3 +2068,17 @@ pub async fn stats_credit_history(
     }))
     .into_response()
 }
+
+/// POST /api/admin/proxy-pool/diagnose
+/// 网络诊断：出口 IP 归属地/运营商 + 站点连通与延迟。
+/// body 可选字段：proxyId / credentialId / proxyUrl(+proxyUsername/proxyPassword)；全空则测全局代理或直连
+pub async fn diagnose_proxy(
+    State(state): State<AdminState>,
+    payload: Option<Json<super::types::ProxyDiagnoseRequest>>,
+) -> impl IntoResponse {
+    let request = payload.map(|Json(r)| r).unwrap_or_default();
+    match state.service.diagnose_proxy(request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
